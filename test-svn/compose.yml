@@ -1,0 +1,9 @@
+services:
+  svn:
+    image: garethflowers/svn-server:latest
+    container_name: svnclient-test-svn
+    restart: unless-stopped
+    ports:
+      - "3690:3690"
+    volumes:
+      - ./repos:/var/opt/svn

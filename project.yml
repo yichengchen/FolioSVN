@@ -1,0 +1,96 @@
+name: SVNClient
+options:
+  deploymentTarget:
+    macOS: "26.0"
+  xcodeVersion: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+packages:
+  SnapKit:
+    url: https://github.com/SnapKit/SnapKit.git
+    from: 6.0.0
+  XMLCoder:
+    url: https://github.com/CoreOffice/XMLCoder.git
+    from: 0.17.0
+  GRDB:
+    url: https://github.com/groue/GRDB.swift.git
+    from: 7.0.0
+  KeychainAccess:
+    url: https://github.com/kishikawakatsumi/KeychainAccess.git
+    from: 4.2.2
+targets:
+  SVNClient:
+    type: application
+    platform: macOS
+    preBuildScripts:
+      - name: Validate bundled SVN runtime
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "$CONFIGURATION" = "Release" ]; then
+            SVN_RUNTIME="$SRCROOT/Vendor/SVNRuntime/bin/svn"
+            if [ ! -x "$SVN_RUNTIME" ]; then
+              echo "error: Release requires Vendor/SVNRuntime/bin/svn"
+              exit 1
+            fi
+            if otool -L "$SVN_RUNTIME" | grep -E '/opt/homebrew|/usr/local/Cellar' >/dev/null; then
+              echo "error: Bundled svn contains non-relocatable Homebrew library references"
+              exit 1
+            fi
+          fi
+    postBuildScripts:
+      - name: Sign bundled SVN runtime
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "$CONFIGURATION" = "Release" ] && [ "$CODE_SIGNING_ALLOWED" != "NO" ]; then
+            RUNTIME_DIR="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/SVNRuntime"
+            SIGN_IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
+            if [ -d "$RUNTIME_DIR/lib" ]; then
+              find "$RUNTIME_DIR/lib" -type f -name '*.dylib' -print0 | while IFS= read -r -d '' LIBRARY; do
+                codesign --force --options runtime --sign "$SIGN_IDENTITY" "$LIBRARY"
+              done
+            fi
+            codesign --force --options runtime --sign "$SIGN_IDENTITY" "$RUNTIME_DIR/bin/svn"
+          fi
+    sources:
+      - path: Sources/SVNClient
+      - path: Vendor/SVNRuntime
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.svnclient
+        PRODUCT_NAME: SVNClient
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: SVN Client
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.business
+        CODE_SIGN_STYLE: Automatic
+    dependencies:
+      - package: SnapKit
+      - package: XMLCoder
+      - package: GRDB
+      - package: KeychainAccess
+  SVNClientTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/SVNClientTests
+    resources:
+      - path: Tests/SVNClientTests/Fixtures
+    dependencies:
+      - target: SVNClient
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.svnclient.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  SVNClient:
+    build:
+      targets:
+        SVNClient: all
+        SVNClientTests: [test]
+    test:
+      targets:
+        - SVNClientTests

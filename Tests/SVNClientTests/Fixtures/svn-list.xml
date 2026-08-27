@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lists>
+  <list path="https://svn.example.com/repos/company/trunk">
+    <entry kind="dir">
+      <name>SDK</name>
+      <commit revision="12580">
+        <author>zhangsan</author>
+        <date>2026-08-23T10:20:00.000000Z</date>
+      </commit>
+    </entry>
+    <entry kind="file">
+      <name>接口说明.pdf</name>
+      <size>2621440</size>
+      <commit revision="12570">
+        <author>lisi</author>
+        <date>2026-08-22T16:42:00.000000Z</date>
+      </commit>
+    </entry>
+  </list>
+</lists>

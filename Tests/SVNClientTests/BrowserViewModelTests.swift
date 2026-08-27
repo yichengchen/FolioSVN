@@ -1,0 +1,350 @@
+import Foundation
+import XCTest
+@testable import SVNClient
+
+@MainActor
+final class BrowserViewModelTests: XCTestCase {
+    func testConnectLoadsAndFormatsRepositoryEntries() async throws {
+        let client = MockSVNClient(result: .success([
+            SVNListEntry(
+                name: "技术资料",
+                kind: .directory,
+                size: nil,
+                revision: 12,
+                author: "zhangsan",
+                updatedAt: Date(timeIntervalSince1970: 0)
+            ),
+            SVNListEntry(
+                name: "接口说明.pdf",
+                kind: .file,
+                size: 2_621_440,
+                revision: 13,
+                author: "lisi",
+                updatedAt: nil
+            )
+        ]))
+        let viewModel = BrowserViewModel(svnClient: client)
+        let url = try XCTUnwrap(URL(string: "https://svn.example.com/company"))
+
+        try await viewModel.connect(to: url)
+
+        XCTAssertEqual(viewModel.state, .loaded(url))
+        XCTAssertEqual(viewModel.rows.map(\.name), ["技术资料", "接口说明.pdf"])
+        XCTAssertEqual(viewModel.rows[0].kind, .directory)
+        XCTAssertEqual(viewModel.rows[1].author, "lisi")
+        XCTAssertNotEqual(viewModel.rows[1].size, "—")
+    }
+
+    func testConnectFailureIsRenderedAndRethrown() async {
+        let expectedError = SVNClientError.invalidListXML
+        let viewModel = BrowserViewModel(svnClient: MockSVNClient(result: .failure(expectedError)))
+        let url = URL(fileURLWithPath: "/tmp/missing-repository")
+
+        do {
+            try await viewModel.connect(to: url)
+            XCTFail("Expected connection to fail")
+        } catch {
+            XCTAssertEqual(error as? SVNClientError, expectedError)
+        }
+
+        guard case .failed = viewModel.state else {
+            return XCTFail("Expected failed view state")
+        }
+        XCTAssertTrue(viewModel.rows.isEmpty)
+    }
+
+    func testConfiguredStartPathAndDirectoryNavigationBuildReadableBreadcrumbs() async throws {
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/company"))
+        let client = RoutingSVNClient(entriesByURL: [
+            "https://svn.example.com/company/%E6%8A%80%E6%9C%AF%E9%83%A8": [
+                SVNListEntry(name: "共享资料", kind: .directory, size: nil, revision: 8, author: nil, updatedAt: nil)
+            ],
+            "https://svn.example.com/company/%E6%8A%80%E6%9C%AF%E9%83%A8/%E5%85%B1%E4%BA%AB%E8%B5%84%E6%96%99/": []
+        ])
+        let viewModel = BrowserViewModel(svnClient: client)
+        let profile = RepositoryProfile(
+            id: UUID(),
+            displayName: "公司文档",
+            baseURL: rootURL,
+            username: "",
+            certificatePolicy: .strict,
+            startPath: "技术部",
+            createdAt: .now,
+            updatedAt: .now
+        )
+
+        try await viewModel.connect(profile: profile, password: nil)
+
+        XCTAssertEqual(viewModel.currentURL, profile.startURL)
+        XCTAssertEqual(viewModel.breadcrumbs.map(\.title), ["公司文档", "技术部"])
+        try await viewModel.openDirectory(try XCTUnwrap(viewModel.rows.first))
+        XCTAssertEqual(viewModel.breadcrumbs.map(\.title), ["公司文档", "技术部", "共享资料"])
+        XCTAssertTrue(viewModel.canGoBack)
+        try await viewModel.goBack()
+        XCTAssertEqual(viewModel.currentURL, profile.startURL)
+        XCTAssertTrue(viewModel.canGoForward)
+    }
+
+    func testDisplayPathIsReadableWhileRepositoryURLRemainsEncoded() async throws {
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo"))
+        let client = MockSVNClient(result: .success([
+            SVNListEntry(name: "接口说明.pdf", kind: .file, size: 10, revision: 2, author: nil, updatedAt: nil)
+        ]))
+        let viewModel = BrowserViewModel(svnClient: client)
+        let profile = RepositoryProfile(
+            id: UUID(),
+            displayName: "公司文档",
+            baseURL: rootURL,
+            username: "",
+            certificatePolicy: .strict,
+            createdAt: .now,
+            updatedAt: .now
+        )
+
+        try await viewModel.connect(profile: profile, password: nil)
+        let row = try XCTUnwrap(viewModel.rows.first)
+
+        XCTAssertEqual(viewModel.displayPath(for: row), "公司文档 / 接口说明.pdf")
+        XCTAssertTrue(viewModel.itemURL(for: row).absoluteString.contains("%E6%8E%A5%E5%8F%A3%E8%AF%B4%E6%98%8E.pdf"))
+    }
+
+    func testWriteSuccessShowsCommittedRevisionAfterRefresh() async throws {
+        let viewModel = BrowserViewModel(svnClient: WriteSVNClient(revision: 42))
+        let url = try XCTUnwrap(URL(string: "https://svn.example.com/company"))
+
+        try await viewModel.connect(to: url)
+        let result = try await viewModel.createDirectory(name: "新目录", message: "创建新目录")
+
+        XCTAssertEqual(result.revision, 42)
+        XCTAssertEqual(viewModel.noticeText, "文件夹已创建 · r42")
+        XCTAssertEqual(viewModel.statusText, "文件夹已创建 · r42")
+    }
+
+    func testPromisedDownloadKeepsOriginalURLRevisionAndCredentialsAfterNavigationChanges() async throws {
+        let client = DownloadSVNClient()
+        let viewModel = BrowserViewModel(svnClient: client)
+        let originalURL = try XCTUnwrap(URL(string: "https://svn.example.com/original"))
+        let profile = RepositoryProfile(
+            id: UUID(),
+            displayName: "原仓库",
+            baseURL: originalURL,
+            username: "original-user",
+            certificatePolicy: .allowUnknownCertificateAuthority,
+            createdAt: .now,
+            updatedAt: .now
+        )
+        try await viewModel.connect(profile: profile, password: "original-password")
+        let row = try XCTUnwrap(viewModel.rows.first)
+        let request = try XCTUnwrap(viewModel.downloadRequest(for: row))
+
+        try await viewModel.connect(to: try XCTUnwrap(URL(string: "https://svn.example.com/other")))
+        try await viewModel.download(
+            request,
+            to: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+            overwrite: false
+        )
+
+        let recordedExport = await client.lastExport
+        let export = try XCTUnwrap(recordedExport)
+        XCTAssertEqual(export.url, originalURL.appendingPathComponent("说明.txt"))
+        XCTAssertEqual(export.revision, 17)
+        XCTAssertEqual(export.options.credentials?.username, "original-user")
+        XCTAssertEqual(export.options.credentials?.password, "original-password")
+        XCTAssertEqual(export.options.certificateTrustPolicy, .allowUnknownCertificateAuthority)
+    }
+
+    func testSearchBuildsLocalIndexOnDemandAndFiltersCurrentDirectory() async throws {
+        let store = try RepositoryMetadataStore(inMemory: ())
+        let metadata = RepositoryMetadataService(store: store)
+        let client = SearchSVNClient()
+        let viewModel = BrowserViewModel(svnClient: client, metadataService: metadata)
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        let profile = RepositoryProfile(
+            id: UUID(), displayName: "公司文档", baseURL: rootURL, username: "",
+            certificatePolicy: .strict, createdAt: .now, updatedAt: .now
+        )
+
+        try await viewModel.connect(profile: profile, password: nil)
+        let technicalDirectory = try XCTUnwrap(viewModel.rows.first(where: { $0.name == "技术部" }))
+        try await viewModel.openDirectory(technicalDirectory)
+        try await viewModel.search(query: "api", scope: .currentDirectory)
+
+        XCTAssertTrue(viewModel.isShowingSearchResults)
+        XCTAssertEqual(viewModel.rows.map(\.name), ["API-Guide.txt"])
+        XCTAssertEqual(viewModel.rows.first?.location, "技术部")
+        XCTAssertNotNil(viewModel.searchIndexedAt)
+        XCTAssertTrue(viewModel.statusText.contains("索引更新于"))
+        let firstRecursiveListCount = await client.recursiveListCount
+        XCTAssertEqual(firstRecursiveListCount, 1)
+        _ = try await viewModel.localURLForOpening(try XCTUnwrap(viewModel.rows.first))
+        let liveInfoCount = await client.infoCount
+        let liveExportRevision = await client.lastExportRevision
+        XCTAssertEqual(liveInfoCount, 1, "Opening an indexed result must validate it against the server")
+        XCTAssertEqual(liveExportRevision, 5, "The validated live revision must replace the stale indexed revision")
+
+        try await viewModel.search(query: "api", scope: .configuredRoot)
+        XCTAssertEqual(Set(viewModel.rows.map(\.name)), ["API-Guide.txt", "api-plan.txt"])
+        let secondRecursiveListCount = await client.recursiveListCount
+        XCTAssertEqual(secondRecursiveListCount, 1, "Subsequent searches must use the local index")
+    }
+
+    func testFavoritesAndRecentAccessArePersistedLocally() async throws {
+        let store = try RepositoryMetadataStore(inMemory: ())
+        let metadata = RepositoryMetadataService(store: store)
+        let client = SearchSVNClient()
+        let viewModel = BrowserViewModel(svnClient: client, metadataService: metadata)
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        let profile = RepositoryProfile(
+            id: UUID(), displayName: "公司文档", baseURL: rootURL, username: "",
+            certificatePolicy: .strict, createdAt: .now, updatedAt: .now
+        )
+
+        try await viewModel.connect(profile: profile, password: nil)
+        let file = try XCTUnwrap(viewModel.rows.first(where: { $0.name == "README.txt" }))
+        let wasAdded = try await viewModel.toggleFavorite(file)
+        XCTAssertTrue(wasAdded)
+        _ = try await viewModel.localURLForOpening(file)
+
+        let favorites = try await metadata.favorites()
+        let recents = try await metadata.recentItems()
+        XCTAssertEqual(favorites.map(\.url), [file.url])
+        XCTAssertTrue(recents.contains(where: { $0.url == rootURL && $0.kind == .directory }))
+        XCTAssertTrue(recents.contains(where: { $0.url == file.url && $0.kind == .file }))
+    }
+}
+
+private final class MockSVNClient: SVNClient, Sendable {
+    private let result: Result<[SVNListEntry], SVNClientError>
+
+    init(result: Result<[SVNListEntry], SVNClientError>) {
+        self.result = result
+    }
+
+    func version() async throws -> String {
+        "1.14.5"
+    }
+
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        try result.get()
+    }
+}
+
+private final class RoutingSVNClient: SVNClient, Sendable {
+    private let entriesByURL: [String: [SVNListEntry]]
+
+    init(entriesByURL: [String: [SVNListEntry]]) {
+        self.entriesByURL = entriesByURL
+    }
+
+    func version() async throws -> String { "1.14.5" }
+
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        if let entries = entriesByURL[url.absoluteString] { return entries }
+        if let entries = entriesByURL[url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))] {
+            return entries
+        }
+        return []
+    }
+}
+
+private final class WriteSVNClient: SVNClient, Sendable {
+    private let revision: Int
+
+    init(revision: Int) {
+        self.revision = revision
+    }
+
+    func version() async throws -> String { "1.14.5" }
+
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] { [] }
+
+    func makeDirectory(url: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
+        SVNWriteResult(revision: revision)
+    }
+}
+
+private actor DownloadSVNClient: SVNClient {
+    struct Export: Sendable {
+        let url: URL
+        let revision: Int?
+        let options: SVNRequestOptions
+    }
+
+    private(set) var lastExport: Export?
+
+    func version() async throws -> String { "1.14.5" }
+
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        [SVNListEntry(name: "说明.txt", kind: .file, size: 10, revision: 17, author: nil, updatedAt: nil)]
+    }
+
+    func export(
+        url: URL,
+        to destinationURL: URL,
+        revision: Int?,
+        overwrite: Bool,
+        options: SVNRequestOptions
+    ) async throws {
+        lastExport = Export(url: url, revision: revision, options: options)
+    }
+}
+
+private actor SearchSVNClient: SVNClient {
+    private(set) var recursiveListCount = 0
+    private(set) var infoCount = 0
+    private(set) var lastExportRevision: Int?
+
+    func version() async throws -> String { "1.14.5" }
+
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        if url.path.hasSuffix("技术部") || url.path.hasSuffix("技术部/") {
+            return [SVNListEntry(
+                name: "API-Guide.txt", kind: .file, size: 20, revision: 8,
+                author: "tester", updatedAt: Date(timeIntervalSince1970: 300)
+            )]
+        }
+        return [
+            SVNListEntry(name: "技术部", kind: .directory, size: nil, revision: 7, author: "tester", updatedAt: nil),
+            SVNListEntry(name: "README.txt", kind: .file, size: 10, revision: 5, author: "tester", updatedAt: nil)
+        ]
+    }
+
+    func listRecursively(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        recursiveListCount += 1
+        return [
+            SVNListEntry(name: "技术部", kind: .directory, size: nil, revision: 7, author: "tester", updatedAt: nil),
+            SVNListEntry(name: "技术部/API-Guide.txt", kind: .file, size: 20, revision: 8, author: "tester", updatedAt: nil),
+            SVNListEntry(name: "市场部/api-plan.txt", kind: .file, size: 30, revision: 9, author: "tester", updatedAt: nil)
+        ]
+    }
+
+    func info(url: URL, options: SVNRequestOptions) async throws -> SVNItemInfo {
+        infoCount += 1
+        return SVNItemInfo(
+            name: url.lastPathComponent,
+            url: url,
+            kind: .file,
+            size: 10,
+            revision: 5,
+            lastChangedRevision: 5,
+            author: "tester",
+            updatedAt: nil,
+            properties: [:]
+        )
+    }
+
+    func export(
+        url: URL,
+        to destinationURL: URL,
+        revision: Int?,
+        overwrite: Bool,
+        options: SVNRequestOptions
+    ) async throws {
+        lastExportRevision = revision
+        try FileManager.default.createDirectory(
+            at: destinationURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("test".utf8).write(to: destinationURL)
+    }
+}
