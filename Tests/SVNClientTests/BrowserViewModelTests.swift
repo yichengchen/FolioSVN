@@ -240,6 +240,50 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.rows.contains(where: { $0.name == "刷新后.txt" }))
         XCTAssertEqual(viewModel.noticeText, "目录缓存已刷新")
     }
+
+    func testDownloadCreatesCompletedTransferRecordThatCanBeCleared() async throws {
+        let client = DownloadSVNClient()
+        let viewModel = BrowserViewModel(svnClient: client)
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        try await viewModel.connect(to: rootURL)
+        let row = try XCTUnwrap(viewModel.rows.first)
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("transfer-\(UUID().uuidString).txt")
+
+        try await viewModel.download(row, to: destination, overwrite: false)
+
+        let transfer = try XCTUnwrap(viewModel.transfers.first)
+        XCTAssertEqual(transfer.title, "下载 说明.txt")
+        XCTAssertEqual(transfer.state, .completed)
+        XCTAssertEqual(viewModel.activeTransferCount, 0)
+        viewModel.clearFinishedTransfers()
+        XCTAssertTrue(viewModel.transfers.isEmpty)
+    }
+
+    func testCancellingDownloadMarksTransferAsCancelled() async throws {
+        let client = CancellableTransferSVNClient()
+        let viewModel = BrowserViewModel(svnClient: client)
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        try await viewModel.connect(to: rootURL)
+        let row = try XCTUnwrap(viewModel.rows.first)
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cancelled-transfer-\(UUID().uuidString).txt")
+        let task = Task { @MainActor in
+            try await viewModel.download(row, to: destination, overwrite: false)
+        }
+        while viewModel.activeTransferCount == 0 { await Task.yield() }
+
+        task.cancel()
+        do {
+            try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        XCTAssertEqual(viewModel.transfers.first?.state, .cancelled)
+        XCTAssertEqual(viewModel.activeTransferCount, 0)
+    }
 }
 
 private final class MockSVNClient: SVNClient, Sendable {
@@ -400,5 +444,23 @@ private actor CachingSVNClient: SVNClient {
                 updatedAt: nil
             )
         ]
+    }
+}
+
+private actor CancellableTransferSVNClient: SVNClient {
+    func version() async throws -> String { "1.14.5" }
+
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        [SVNListEntry(name: "大文件.zip", kind: .file, size: 1024, revision: 2, author: nil, updatedAt: nil)]
+    }
+
+    func export(
+        url: URL,
+        to destinationURL: URL,
+        revision: Int?,
+        overwrite: Bool,
+        options: SVNRequestOptions
+    ) async throws {
+        try await Task.sleep(for: .seconds(60))
     }
 }

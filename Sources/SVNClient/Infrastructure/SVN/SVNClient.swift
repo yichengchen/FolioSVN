@@ -136,6 +136,7 @@ enum SVNClientError: Error, Equatable, Sendable {
     case invalidLocalFile(String)
     case duplicateLocalFileName(String)
     case remoteChanged
+    case connectionTimedOut
     case unsupportedOperation
 }
 
@@ -184,6 +185,8 @@ extension SVNClientError: LocalizedError {
             return "选择中包含同名文件：\(name)"
         case .remoteChanged:
             return "文件已被其他人更新，请刷新后重试"
+        case .connectionTimedOut:
+            return "连接或读取 SVN 服务器超过 10 秒，已停止等待；请检查服务器地址和网络"
         case .unsupportedOperation:
             return "当前 SVN 客户端不支持此操作"
         }
@@ -195,13 +198,16 @@ final class SVNCLIGateway: SVNClient, Sendable {
     private let executableURL: URL
     private let executablePrefix: [String]
     private let commandEnvironment: [String: String]
+    private let connectionTimeout: Duration
 
     init(
         runner: any SVNCommandRunning = ProcessSVNCommandRunner(),
         executableURL: URL? = nil,
-        executableName: String? = nil
+        executableName: String? = nil,
+        connectionTimeout: Duration = .seconds(10)
     ) {
         self.runner = runner
+        self.connectionTimeout = connectionTimeout
         let resolvedExecutableURL: URL
         let resolvedExecutablePrefix: [String]
         if let executableURL {
@@ -233,7 +239,11 @@ final class SVNCLIGateway: SVNClient, Sendable {
     }
 
     func version() async throws -> String {
-        let output = try await execute(operation: "version", arguments: ["--version", "--quiet"])
+        let output = try await execute(
+            operation: "version",
+            arguments: ["--version", "--quiet"],
+            timeout: connectionTimeout
+        )
         guard let rawVersion = String(data: output.standardOutput, encoding: .utf8) else {
             throw SVNClientError.invalidVersionOutput
         }
@@ -260,7 +270,8 @@ final class SVNCLIGateway: SVNClient, Sendable {
         let output = try await execute(
             operation: "list",
             arguments: arguments,
-            standardInput: standardInput
+            standardInput: standardInput,
+            timeout: connectionTimeout
         )
         do {
             let decoder = XMLDecoder()
@@ -302,13 +313,15 @@ final class SVNCLIGateway: SVNClient, Sendable {
             operation: "info",
             arguments: ["info", Self.svnTarget(url.absoluteString), "--xml"],
             urls: [url],
-            options: options
+            options: options,
+            timeout: connectionTimeout
         )
         let propertiesOutput = try await executeAuthenticated(
             operation: "proplist",
             arguments: ["proplist", Self.svnTarget(url.absoluteString), "--xml", "--verbose"],
             urls: [url],
-            options: options
+            options: options,
+            timeout: connectionTimeout
         )
 
         let infoDTO: SVNInfoDocumentDTO
@@ -511,7 +524,8 @@ final class SVNCLIGateway: SVNClient, Sendable {
             operation: "checkout",
             arguments: ["checkout", Self.svnTarget(directoryURL.absoluteString), workspaceURL.path, "--depth", "empty", "--ignore-externals"],
             urls: [directoryURL],
-            options: options
+            options: options,
+            timeout: connectionTimeout
         )
         return try await operation(workspaceURL)
     }
@@ -520,7 +534,8 @@ final class SVNCLIGateway: SVNClient, Sendable {
         operation: String,
         arguments: [String],
         urls: [URL],
-        options: SVNRequestOptions
+        options: SVNRequestOptions,
+        timeout: Duration? = nil
     ) async throws -> SVNProcessOutput {
         var authenticatedArguments = arguments + ["--non-interactive"]
         var standardInput: Data?
@@ -535,7 +550,8 @@ final class SVNCLIGateway: SVNClient, Sendable {
         return try await execute(
             operation: operation,
             arguments: authenticatedArguments,
-            standardInput: standardInput
+            standardInput: standardInput,
+            timeout: timeout
         )
     }
 
@@ -560,14 +576,34 @@ final class SVNCLIGateway: SVNClient, Sendable {
     private func execute(
         operation: String,
         arguments: [String],
-        standardInput: Data? = nil
+        standardInput: Data? = nil,
+        timeout: Duration? = nil
     ) async throws -> SVNProcessOutput {
-        let output = try await runner.run(
-            executableURL: executableURL,
-            arguments: executablePrefix + arguments,
-            environment: commandEnvironment,
-            standardInput: standardInput
-        )
+        let runCommand: @Sendable () async throws -> SVNProcessOutput = {
+            try await self.runner.run(
+                executableURL: self.executableURL,
+                arguments: self.executablePrefix + arguments,
+                environment: self.commandEnvironment,
+                standardInput: standardInput
+            )
+        }
+        let output: SVNProcessOutput
+        if let timeout {
+            output = try await withThrowingTaskGroup(of: SVNProcessOutput.self) { group in
+                group.addTask(operation: runCommand)
+                group.addTask {
+                    try await Task.sleep(for: timeout)
+                    throw SVNClientError.connectionTimedOut
+                }
+                defer { group.cancelAll() }
+                guard let first = try await group.next() else {
+                    throw CancellationError()
+                }
+                return first
+            }
+        } else {
+            output = try await runCommand()
+        }
         guard output.exitStatus == 0 else {
             throw SVNClientError.commandFailed(
                 SVNCommandFailure(

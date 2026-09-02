@@ -11,6 +11,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private let statusLabel = NSTextField(labelWithString: "")
     private let progressIndicator = NSProgressIndicator()
     private let cancelActivityButton = NSButton(title: "取消", target: nil, action: nil)
+    private let transferButton = NSButton(title: "传输", target: nil, action: nil)
     private let emptyStateLabel = NSTextField(wrappingLabelWithString: "")
     private let scrollView = NSScrollView()
     private let tableView = NSTableView()
@@ -176,6 +177,15 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         cancelActivityButton.target = self
         cancelActivityButton.action = #selector(cancelCurrentActivity)
         cancelActivityButton.isHidden = true
+        transferButton.bezelStyle = .inline
+        transferButton.controlSize = .small
+        transferButton.image = NSImage(
+            systemSymbolName: "arrow.up.arrow.down",
+            accessibilityDescription: "传输任务"
+        )
+        transferButton.imagePosition = .imageLeading
+        transferButton.target = self
+        transferButton.action = #selector(showTransferTasks)
 
         emptyStateLabel.alignment = .center
         emptyStateLabel.font = .systemFont(ofSize: 15, weight: .medium)
@@ -190,6 +200,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         statusBar.addSubview(statusDivider)
         statusBar.addSubview(progressIndicator)
         statusBar.addSubview(statusLabel)
+        statusBar.addSubview(transferButton)
         statusBar.addSubview(cancelActivityButton)
 
         breadcrumbContainer.snp.makeConstraints {
@@ -228,7 +239,11 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         statusLabel.snp.makeConstraints {
             $0.leading.equalTo(progressIndicator.snp.trailing).offset(7)
             $0.centerY.equalToSuperview()
-            $0.trailing.lessThanOrEqualTo(cancelActivityButton.snp.leading).offset(-8)
+            $0.trailing.lessThanOrEqualTo(transferButton.snp.leading).offset(-8)
+        }
+        transferButton.snp.makeConstraints {
+            $0.trailing.equalTo(cancelActivityButton.snp.leading).offset(-4)
+            $0.centerY.equalToSuperview()
         }
         cancelActivityButton.snp.makeConstraints {
             $0.trailing.equalToSuperview().inset(10)
@@ -238,6 +253,9 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
 
     private func render() {
         statusLabel.stringValue = viewModel.statusText
+        transferButton.title = viewModel.activeTransferCount > 0
+            ? "传输（\(viewModel.activeTransferCount)）"
+            : "传输"
         viewModel.isBusy ? progressIndicator.startAnimation(nil) : progressIndicator.stopAnimation(nil)
         cancelActivityButton.isHidden = !viewModel.isCancellable
         tableView.reloadData()
@@ -610,6 +628,62 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         searchTask?.cancel()
     }
 
+    @objc private func showTransferTasks() {
+        let menu = NSMenu(title: "传输任务")
+        if viewModel.transfers.isEmpty {
+            let item = NSMenuItem(title: "暂无传输记录", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        } else {
+            for transfer in viewModel.transfers.prefix(10) {
+                let item = NSMenuItem(
+                    title: "\(transfer.title) · \(transfer.stateText)",
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                item.subtitle = transfer.statusDetail
+                item.image = NSImage(
+                    systemSymbolName: transferSymbolName(transfer),
+                    accessibilityDescription: transfer.stateText
+                )
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+        }
+        if viewModel.isCancellable {
+            menu.addItem(.separator())
+            let cancel = menu.addItem(
+                withTitle: "取消当前传输",
+                action: #selector(cancelCurrentActivity),
+                keyEquivalent: ""
+            )
+            cancel.target = self
+        }
+        if viewModel.transfers.contains(where: { $0.state != .running }) {
+            menu.addItem(.separator())
+            let clear = menu.addItem(
+                withTitle: "清除已完成记录",
+                action: #selector(clearFinishedTransfers),
+                keyEquivalent: ""
+            )
+            clear.target = self
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: transferButton.bounds.maxY + 4), in: transferButton)
+    }
+
+    @objc private func clearFinishedTransfers() {
+        viewModel.clearFinishedTransfers()
+    }
+
+    private func transferSymbolName(_ transfer: BrowserTransfer) -> String {
+        switch transfer.state {
+        case .running: return "hourglass"
+        case .completed: return "checkmark.circle"
+        case .cancelled: return "xmark.circle"
+        case .failed: return "exclamationmark.triangle"
+        }
+    }
+
     private func presentError(message: String) {
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -742,17 +816,35 @@ extension BrowserViewController: NSFilePromiseProviderDelegate {
         // Finder supplies the complete, coordinated destination URL, including the promised filename.
         let destinationURL = url
         Task { @MainActor [weak self] in
+            self?.startFilePromiseDownload(
+                downloadRequest,
+                to: destinationURL,
+                completion: completion
+            ) ?? completion.call(CancellationError())
+        }
+    }
+}
+
+private extension BrowserViewController {
+    func startFilePromiseDownload(
+        _ request: BrowserDownloadRequest,
+        to destinationURL: URL,
+        completion: FilePromiseCompletion
+    ) {
+        let task = Task { @MainActor [weak self] in
             guard let self else {
                 completion.call(CancellationError())
                 return
             }
+            defer { self.operationTask = nil }
             do {
-                try await viewModel.download(downloadRequest, to: destinationURL, overwrite: false)
+                try await viewModel.download(request, to: destinationURL, overwrite: false)
                 completion.call(nil)
             } catch {
                 completion.call(error)
             }
         }
+        operationTask = task
     }
 }
 

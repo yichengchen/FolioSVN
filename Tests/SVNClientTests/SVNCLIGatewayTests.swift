@@ -11,6 +11,31 @@ private func makeMockGateway(_ runner: MockSVNCommandRunner) -> SVNCLIGateway {
 }
 
 final class SVNCLIGatewayTests: XCTestCase {
+    func testProcessRunnerCancellationDoesNotWaitForChildCommand() async throws {
+        let runner = ProcessSVNCommandRunner()
+        let task = Task {
+            try await runner.run(
+                executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                arguments: ["60"],
+                environment: nil,
+                standardInput: nil
+            )
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        let clock = ContinuousClock()
+        let startedCancelling = clock.now
+
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        XCTAssertLessThan(startedCancelling.duration(to: clock.now), .seconds(2))
+    }
+
     func testVersionUsesExpectedProcessArguments() async throws {
         let runner = MockSVNCommandRunner(output: .success(stdout: "1.14.5\n"))
         let gateway = makeMockGateway(runner)
@@ -189,6 +214,40 @@ final class SVNCLIGatewayTests: XCTestCase {
         )
     }
 
+    func testListStopsWaitingAfterConnectionTimeout() async {
+        let gateway = SVNCLIGateway(
+            runner: HangingSVNCommandRunner(),
+            executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+            executableName: "svn",
+            connectionTimeout: .milliseconds(20)
+        )
+
+        do {
+            _ = try await gateway.list(url: URL(string: "https://svn.example.com/repo")!)
+            XCTFail("Expected connection timeout")
+        } catch let error as SVNClientError {
+            XCTAssertEqual(error, .connectionTimedOut)
+            XCTAssertEqual(
+                error.localizedDescription,
+                "连接或读取 SVN 服务器超过 10 秒，已停止等待；请检查服务器地址和网络"
+            )
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+}
+
+private actor HangingSVNCommandRunner: SVNCommandRunning {
+    func run(
+        executableURL: URL,
+        arguments: [String],
+        environment: [String: String]?,
+        standardInput: Data?
+    ) async throws -> SVNProcessOutput {
+        try await Task.sleep(for: .seconds(60))
+        return SVNProcessOutput(standardOutput: Data(), standardError: Data(), exitStatus: 0)
+    }
 }
 
 private final class MockSVNCommandRunner: SVNCommandRunning, @unchecked Sendable {

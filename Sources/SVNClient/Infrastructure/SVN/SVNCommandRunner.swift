@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 struct SVNProcessOutput: Sendable {
     let standardOutput: Data
@@ -55,7 +56,7 @@ final class ProcessSVNCommandRunner: SVNCommandRunning, Sendable {
                         standardInputPipe.fileHandleForWriting.write(standardInput)
                         try? standardInputPipe.fileHandleForWriting.close()
                     }
-                    if state.isCancelled { process.terminate() }
+                    if state.isCancelled { state.terminate() }
                 } catch {
                     try? standardOutput.fileHandleForWriting.close()
                     try? standardError.fileHandleForWriting.close()
@@ -88,10 +89,26 @@ private final class ProcessExecutionState: @unchecked Sendable {
 
     func terminate() {
         lock.lock()
-        defer { lock.unlock() }
         cancelled = true
-        guard let process, process.isRunning else { return }
+        guard let process, process.isRunning else {
+            lock.unlock()
+            return
+        }
+        let processIdentifier = process.processIdentifier
         process.terminate()
+        lock.unlock()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.forceKillIfNeeded(processIdentifier: processIdentifier)
+        }
+    }
+
+    private func forceKillIfNeeded(processIdentifier: Int32) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let process,
+              process.processIdentifier == processIdentifier,
+              process.isRunning else { return }
+        Darwin.kill(processIdentifier, SIGKILL)
     }
 
     func resume(

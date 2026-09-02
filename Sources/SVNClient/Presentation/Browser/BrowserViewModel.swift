@@ -10,8 +10,49 @@ struct RepositorySession: Sendable {
 
 struct BrowserDownloadRequest: Sendable {
     let sourceURL: URL
+    let displayName: String
+    let byteSize: Int64?
     let revision: Int?
     let options: SVNRequestOptions
+}
+
+struct BrowserTransfer: Identifiable, Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
+        case download
+        case upload
+        case replace
+    }
+
+    enum State: Equatable, Sendable {
+        case running
+        case completed
+        case cancelled
+        case failed(String)
+    }
+
+    let id: UUID
+    let kind: Kind
+    let title: String
+    let detail: String
+    var state: State
+    let startedAt: Date
+    var finishedAt: Date?
+
+    var stateText: String {
+        switch state {
+        case .running: return "进行中"
+        case .completed: return "已完成"
+        case .cancelled: return "已取消"
+        case .failed: return "失败"
+        }
+    }
+
+    var statusDetail: String {
+        if case let .failed(message) = state {
+            return "\(detail) · \(message)"
+        }
+        return detail
+    }
 }
 
 @MainActor
@@ -48,6 +89,7 @@ final class BrowserViewModel {
     private(set) var searchScope: SearchScope = .configuredRoot
     private(set) var searchIndexedAt: Date?
     private(set) var directoryCachedAt: Date?
+    private(set) var transfers: [BrowserTransfer] = []
     private(set) var session: RepositorySession?
     private(set) var currentURL: URL?
     private var backStack: [URL] = []
@@ -56,6 +98,10 @@ final class BrowserViewModel {
     private var favoriteURLKeys: Set<String> = []
     private let svnClient: any SVNClient
     private let metadataService: RepositoryMetadataService?
+
+    var activeTransferCount: Int {
+        transfers.filter { $0.state == .running }.count
+    }
 
     init(svnClient: any SVNClient, metadataService: RepositoryMetadataService? = nil) {
         self.svnClient = svnClient
@@ -209,13 +255,23 @@ final class BrowserViewModel {
         guard let session else { return nil }
         return BrowserDownloadRequest(
             sourceURL: row.url,
+            displayName: row.name,
+            byteSize: row.byteSize,
             revision: row.kind == .file ? row.revision : nil,
             options: session.options
         )
     }
 
     func download(_ request: BrowserDownloadRequest, to destinationURL: URL, overwrite: Bool) async throws {
-        try await performActivity("正在下载到 \(destinationURL.path)…", cancellable: true) {
+        let sizeText = request.byteSize.map {
+            ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)
+        } ?? "大小未知"
+        try await performTransfer(
+            kind: .download,
+            title: "下载 \(request.displayName)",
+            detail: "\(sizeText) · 保存为 \(destinationURL.lastPathComponent)",
+            cancellable: true
+        ) {
             try await self.svnClient.export(
                 url: request.sourceURL,
                 to: destinationURL,
@@ -250,6 +306,8 @@ final class BrowserViewModel {
             try await download(
                 BrowserDownloadRequest(
                     sourceURL: row.url,
+                    displayName: row.name,
+                    byteSize: row.byteSize,
                     revision: effectiveRevision,
                     options: session.options
                 ),
@@ -437,7 +495,16 @@ final class BrowserViewModel {
                 standardError: "already exists: \(conflict.lastPathComponent)"
             ))
         }
-        let result = try await performActivity("正在上传 \(files.count) 个文件…") {
+        let totalBytes = files.reduce(Int64(0)) { partial, url in
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+            return partial + Int64(values?.fileSize ?? 0)
+        }
+        let result = try await performTransfer(
+            kind: .upload,
+            title: "上传 \(files.count) 个文件",
+            detail: ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file),
+            cancellable: false
+        ) {
             try await self.svnClient.upload(
                 files: files,
                 to: currentURL,
@@ -453,7 +520,14 @@ final class BrowserViewModel {
 
     func replace(_ row: BrowserRow, with localFileURL: URL, message: String) async throws -> SVNWriteResult {
         guard let session, let revision = row.revision else { throw SVNClientError.remoteChanged }
-        let result = try await performActivity("正在替换“\(row.name)”…") {
+        let localSize = (try? localFileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+            .map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? "大小未知"
+        let result = try await performTransfer(
+            kind: .replace,
+            title: "替换 \(row.name)",
+            detail: localSize,
+            cancellable: false
+        ) {
             try await self.svnClient.replace(
                 localFileURL: localFileURL,
                 targetURL: self.itemURL(for: row),
@@ -578,6 +652,64 @@ final class BrowserViewModel {
             onChange?()
             throw error
         }
+    }
+
+    private func performTransfer<Result: Sendable>(
+        kind: BrowserTransfer.Kind,
+        title: String,
+        detail: String,
+        cancellable: Bool,
+        operation: () async throws -> Result
+    ) async throws -> Result {
+        let id = UUID()
+        transfers.insert(
+            BrowserTransfer(
+                id: id,
+                kind: kind,
+                title: title,
+                detail: detail,
+                state: .running,
+                startedAt: .now,
+                finishedAt: nil
+            ),
+            at: 0
+        )
+        trimTransferHistory()
+        onChange?()
+        do {
+            let result = try await performActivity(
+                "正在\(title)…",
+                cancellable: cancellable,
+                operation: operation
+            )
+            finishTransfer(id: id, state: .completed)
+            return result
+        } catch is CancellationError {
+            finishTransfer(id: id, state: .cancelled)
+            throw CancellationError()
+        } catch {
+            finishTransfer(id: id, state: .failed(error.localizedDescription))
+            throw error
+        }
+    }
+
+    func clearFinishedTransfers() {
+        transfers.removeAll { $0.state != .running }
+        onChange?()
+    }
+
+    private func finishTransfer(id: UUID, state: BrowserTransfer.State) {
+        guard let index = transfers.firstIndex(where: { $0.id == id }) else { return }
+        transfers[index].state = state
+        transfers[index].finishedAt = .now
+        trimTransferHistory()
+        onChange?()
+    }
+
+    private func trimTransferHistory() {
+        let active = transfers.filter { $0.state == .running }
+        let finished = transfers.filter { $0.state != .running }.prefix(20)
+        transfers = active + finished
     }
 
     private func showWriteSuccess(_ message: String, result: SVNWriteResult) {
