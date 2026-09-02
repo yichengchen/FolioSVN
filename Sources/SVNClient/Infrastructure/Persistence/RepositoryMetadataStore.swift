@@ -8,12 +8,12 @@ protocol RepositoryMetadataStoring: Sendable {
     func removeFavorite(id: UUID) async throws
     func setFavoriteAvailability(id: UUID, isAvailable: Bool, revision: Int?) async throws
     func markFavoritesUnavailable(profileID: UUID, atOrBelow url: URL) async throws
-    func recentItems(limit: Int) async throws -> [RecentRepositoryItem]
-    func recordRecent(_ item: RecentRepositoryItem, maximumCount: Int) async throws
-    func clearRecentItems() async throws
     func replaceSearchIndex(profileID: UUID, rootURL: URL, entries: [SearchIndexEntry], indexedAt: Date) async throws
     func searchIndex(profileID: UUID, rootURL: URL, directoryURL: URL?, query: String) async throws -> RepositorySearchResults
     func movePaths(profileID: UUID, from sourceURL: URL, to destinationURL: URL) async throws
+    func directoryCache(profileID: UUID, url: URL) async throws -> DirectoryCacheSnapshot?
+    func replaceDirectoryCache(profileID: UUID, url: URL, entries: [SVNListEntry], cachedAt: Date) async throws
+    func clearDirectoryCache(profileID: UUID) async throws
     func deleteMetadata(profileID: UUID) async throws
 }
 
@@ -93,49 +93,6 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
         }
     }
 
-    func recentItems(limit: Int = 50) throws -> [RecentRepositoryItem] {
-        try databaseQueue.read { database in
-            try RecentRecord
-                .order(Column("visitedAt").desc)
-                .limit(max(0, limit))
-                .fetchAll(database)
-                .map(RecentRepositoryItem.init(record:))
-        }
-    }
-
-    func recordRecent(_ item: RecentRepositoryItem, maximumCount: Int = 50) throws {
-        try databaseQueue.write { database in
-            if let existing = try RecentRecord
-                .filter(Column("profileID") == item.profileID.uuidString && Column("url") == item.url.absoluteString)
-                .fetchOne(database) {
-                var updated = RecentRecord(item: item)
-                updated.id = existing.id
-                try updated.save(database)
-            } else {
-                var record = RecentRecord(item: item)
-                try record.insert(database)
-            }
-            let retainedIDs = try String.fetchAll(
-                database,
-                sql: "SELECT id FROM recentItems ORDER BY visitedAt DESC LIMIT ?",
-                arguments: [max(0, maximumCount)]
-            )
-            if retainedIDs.isEmpty {
-                _ = try RecentRecord.deleteAll(database)
-            } else {
-                _ = try RecentRecord
-                    .filter(!retainedIDs.contains(Column("id")))
-                    .deleteAll(database)
-            }
-        }
-    }
-
-    func clearRecentItems() throws {
-        try databaseQueue.write { database in
-            _ = try RecentRecord.deleteAll(database)
-        }
-    }
-
     func replaceSearchIndex(
         profileID: UUID,
         rootURL: URL,
@@ -208,19 +165,6 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
                 try favorites[index].update(database)
             }
 
-            var recents = try RecentRecord.filter(Column("profileID") == profileID.uuidString).fetchAll(database)
-            for index in recents.indices where recents[index].url == source || recents[index].url.hasPrefix(sourcePrefix) {
-                recents[index].url = Self.replacingPrefix(
-                    recents[index].url,
-                    source: source,
-                    sourcePrefix: sourcePrefix,
-                    destination: destination,
-                    destinationPrefix: destinationPrefix
-                )
-                recents[index].name = URL(string: recents[index].url)?.lastPathComponent.removingPercentEncoding ?? recents[index].name
-                try recents[index].update(database)
-            }
-
             let indexed = try SearchIndexRecord.filter(Column("profileID") == profileID.uuidString).fetchAll(database)
             for record in indexed where record.url == source || record.url.hasPrefix(sourcePrefix) {
                 let movedURL = Self.replacingPrefix(
@@ -239,9 +183,56 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
         }
     }
 
+    func directoryCache(profileID: UUID, url: URL) throws -> DirectoryCacheSnapshot? {
+        try databaseQueue.read { database in
+            let key = ["profileID": profileID.uuidString, "directoryURL": url.absoluteString]
+            guard let state = try DirectoryCacheStateRecord.fetchOne(database, key: key) else { return nil }
+            let entries = try DirectoryCacheEntryRecord
+                .filter(Column("profileID") == profileID.uuidString && Column("directoryURL") == url.absoluteString)
+                .order(Column("position"))
+                .fetchAll(database)
+                .map(\.entry)
+            return DirectoryCacheSnapshot(entries: entries, cachedAt: state.cachedAt)
+        }
+    }
+
+    func replaceDirectoryCache(
+        profileID: UUID,
+        url: URL,
+        entries: [SVNListEntry],
+        cachedAt: Date
+    ) throws {
+        try databaseQueue.write { database in
+            _ = try DirectoryCacheEntryRecord
+                .filter(Column("profileID") == profileID.uuidString && Column("directoryURL") == url.absoluteString)
+                .deleteAll(database)
+            for (position, entry) in entries.enumerated() {
+                var record = DirectoryCacheEntryRecord(
+                    profileID: profileID.uuidString,
+                    directoryURL: url.absoluteString,
+                    position: position,
+                    entry: entry
+                )
+                try record.insert(database)
+            }
+            try DirectoryCacheStateRecord(
+                profileID: profileID.uuidString,
+                directoryURL: url.absoluteString,
+                cachedAt: cachedAt
+            ).save(database)
+        }
+    }
+
+    func clearDirectoryCache(profileID: UUID) throws {
+        try databaseQueue.write { database in
+            _ = try DirectoryCacheEntryRecord.filter(Column("profileID") == profileID.uuidString).deleteAll(database)
+            _ = try DirectoryCacheStateRecord.filter(Column("profileID") == profileID.uuidString).deleteAll(database)
+        }
+    }
+
     func deleteMetadata(profileID: UUID) throws {
         try databaseQueue.write { database in
-            for table in ["favoriteItems", "recentItems", "searchIndex", "searchIndexStates"] {
+            for table in ["favoriteItems", "searchIndex", "searchIndexStates", "directoryCacheEntries", "directoryCacheStates"] {
                 try database.execute(sql: "DELETE FROM \(table) WHERE profileID = ?", arguments: [profileID.uuidString])
             }
         }
@@ -277,16 +268,6 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
                 table.column("updatedAt", .datetime).notNull()
                 table.uniqueKey(["profileID", "url"])
             }
-            try database.create(table: "recentItems") { table in
-                table.column("id", .text).primaryKey()
-                table.column("profileID", .text).notNull().indexed()
-                table.column("url", .text).notNull()
-                table.column("name", .text).notNull()
-                table.column("kind", .text).notNull()
-                table.column("lastKnownRevision", .integer)
-                table.column("visitedAt", .datetime).notNull().indexed()
-                table.uniqueKey(["profileID", "url"])
-            }
             try database.create(table: "searchIndex") { table in
                 table.column("profileID", .text).notNull()
                 table.column("rootURL", .text).notNull()
@@ -306,6 +287,36 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
                 table.column("indexedAt", .datetime).notNull()
                 table.primaryKey(["profileID", "rootURL"])
             }
+        }
+        migrator.registerMigration("removeRecentItems") { database in
+            if try database.tableExists("recentItems") {
+                try database.drop(table: "recentItems")
+            }
+        }
+        migrator.registerMigration("createDirectoryCache") { database in
+            try database.create(table: "directoryCacheStates") { table in
+                table.column("profileID", .text).notNull()
+                table.column("directoryURL", .text).notNull()
+                table.column("cachedAt", .datetime).notNull()
+                table.primaryKey(["profileID", "directoryURL"])
+            }
+            try database.create(table: "directoryCacheEntries") { table in
+                table.column("profileID", .text).notNull()
+                table.column("directoryURL", .text).notNull()
+                table.column("position", .integer).notNull()
+                table.column("name", .text).notNull()
+                table.column("kind", .text).notNull()
+                table.column("size", .integer)
+                table.column("revision", .integer)
+                table.column("author", .text)
+                table.column("updatedAt", .datetime)
+                table.primaryKey(["profileID", "directoryURL", "position"])
+            }
+            try database.create(
+                index: "directoryCacheLookup",
+                on: "directoryCacheEntries",
+                columns: ["profileID", "directoryURL"]
+            )
         }
         return migrator
     }()
@@ -333,27 +344,6 @@ private struct FavoriteRecord: Codable, FetchableRecord, MutablePersistableRecor
         isAvailable = favorite.isAvailable
         createdAt = favorite.createdAt
         updatedAt = favorite.updatedAt
-    }
-}
-
-private struct RecentRecord: Codable, FetchableRecord, MutablePersistableRecord {
-    static let databaseTableName = "recentItems"
-    var id: String
-    var profileID: String
-    var url: String
-    var name: String
-    var kind: String
-    var lastKnownRevision: Int?
-    var visitedAt: Date
-
-    init(item: RecentRepositoryItem) {
-        id = item.id.uuidString
-        profileID = item.profileID.uuidString
-        url = item.url.absoluteString
-        name = item.name
-        kind = item.kind.rawValue
-        lastKnownRevision = item.lastKnownRevision
-        visitedAt = item.visitedAt
     }
 }
 
@@ -389,6 +379,49 @@ private struct SearchIndexStateRecord: Codable, FetchableRecord, PersistableReco
     let indexedAt: Date
 }
 
+private struct DirectoryCacheStateRecord: Codable, FetchableRecord, PersistableRecord {
+    static let databaseTableName = "directoryCacheStates"
+    let profileID: String
+    let directoryURL: String
+    let cachedAt: Date
+}
+
+private struct DirectoryCacheEntryRecord: Codable, FetchableRecord, MutablePersistableRecord {
+    static let databaseTableName = "directoryCacheEntries"
+    let profileID: String
+    let directoryURL: String
+    let position: Int
+    let name: String
+    let kind: String
+    let size: Int64?
+    let revision: Int?
+    let author: String?
+    let updatedAt: Date?
+
+    init(profileID: String, directoryURL: String, position: Int, entry: SVNListEntry) {
+        self.profileID = profileID
+        self.directoryURL = directoryURL
+        self.position = position
+        name = entry.name
+        kind = entry.kind.rawValue
+        size = entry.size
+        revision = entry.revision
+        author = entry.author
+        updatedAt = entry.updatedAt
+    }
+
+    var entry: SVNListEntry {
+        SVNListEntry(
+            name: name,
+            kind: SVNListEntry.Kind(rawValue: kind) ?? .file,
+            size: size,
+            revision: revision,
+            author: author,
+            updatedAt: updatedAt
+        )
+    }
+}
+
 private extension FavoriteRepositoryItem {
     init(record: FavoriteRecord) throws {
         guard let id = UUID(uuidString: record.id),
@@ -407,26 +440,6 @@ private extension FavoriteRepositoryItem {
             isAvailable: record.isAvailable,
             createdAt: record.createdAt,
             updatedAt: record.updatedAt
-        )
-    }
-}
-
-private extension RecentRepositoryItem {
-    init(record: RecentRecord) throws {
-        guard let id = UUID(uuidString: record.id),
-              let profileID = UUID(uuidString: record.profileID),
-              let url = URL(string: record.url),
-              let kind = SavedRepositoryItemKind(rawValue: record.kind) else {
-            throw RepositoryMetadataStoreError.invalidRecord
-        }
-        self.init(
-            id: id,
-            profileID: profileID,
-            url: url,
-            name: record.name,
-            kind: kind,
-            lastKnownRevision: record.lastKnownRevision,
-            visitedAt: record.visitedAt
         )
     }
 }

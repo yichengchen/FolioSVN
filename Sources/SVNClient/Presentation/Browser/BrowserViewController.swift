@@ -3,7 +3,7 @@ import SnapKit
 import UniformTypeIdentifiers
 
 @MainActor
-final class BrowserViewController: NSViewController, NSMenuItemValidation {
+final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMenuDelegate {
     var onNavigationStateChange: (() -> Void)?
 
     private let viewModel: BrowserViewModel
@@ -14,6 +14,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation {
     private let emptyStateLabel = NSTextField(wrappingLabelWithString: "")
     private let scrollView = NSScrollView()
     private let tableView = NSTableView()
+    private var favoriteMenuItem: NSMenuItem?
     private var operationTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
 
@@ -122,7 +123,8 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation {
         menu.addItem(withTitle: "打开", action: #selector(openSelectedItem), keyEquivalent: "")
         menu.addItem(withTitle: "下载…", action: #selector(downloadSelectedItem), keyEquivalent: "")
         menu.addItem(withTitle: "替换…", action: #selector(replaceSelectedItem), keyEquivalent: "")
-        menu.addItem(withTitle: "添加或移除收藏", action: #selector(toggleFavoriteForSelectedItem), keyEquivalent: "")
+        let favoriteItem = menu.addItem(withTitle: "添加到收藏", action: #selector(toggleFavoriteForSelectedItem), keyEquivalent: "")
+        favoriteMenuItem = favoriteItem
         menu.addItem(.separator())
         menu.addItem(withTitle: "重命名…", action: #selector(renameSelectedItem), keyEquivalent: "")
         menu.addItem(withTitle: "删除", action: #selector(deleteSelectedItem), keyEquivalent: "")
@@ -132,7 +134,21 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation {
         menu.addItem(withTitle: "复制显示路径", action: #selector(copySelectedDisplayPath), keyEquivalent: "")
         menu.addItem(withTitle: "复制仓库 URL", action: #selector(copySelectedRepositoryURL), keyEquivalent: "")
         for item in menu.items { item.target = self }
+        menu.delegate = self
         tableView.menu = menu
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === tableView.menu else { return }
+        if let event = NSApp.currentEvent, event.window === view.window {
+            let point = tableView.convert(event.locationInWindow, from: nil)
+            let clickedRow = tableView.row(at: point)
+            if clickedRow >= 0 {
+                tableView.selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
+            }
+        }
+        guard let row = selectedRow else { return }
+        favoriteMenuItem?.title = viewModel.isFavorite(row) ? "从收藏移除" : "添加到收藏"
     }
 
     private func configureLayout() {

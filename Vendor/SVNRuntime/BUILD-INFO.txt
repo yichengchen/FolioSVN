@@ -1,0 +1,4 @@
+SVN version: 1.14.5
+Architectures: arm64
+Packaging method: recursive Homebrew runtime closure with @loader_path relocation
+Generated at (UTC): 2026-09-02T06:51:28Z

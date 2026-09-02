@@ -34,7 +34,7 @@ final class BrowserViewModel {
     }
 
     var onChange: (() -> Void)?
-    var onRepositoryChanged: ((UUID) -> Void)?
+    var onRepositoryChanged: ((UUID, URL) -> Void)?
     var onMetadataChanged: (() -> Void)?
 
     private(set) var rows: [BrowserRow] = []
@@ -47,11 +47,13 @@ final class BrowserViewModel {
     private(set) var searchQuery = ""
     private(set) var searchScope: SearchScope = .configuredRoot
     private(set) var searchIndexedAt: Date?
+    private(set) var directoryCachedAt: Date?
     private(set) var session: RepositorySession?
     private(set) var currentURL: URL?
     private var backStack: [URL] = []
     private var forwardStack: [URL] = []
     private var browsingRows: [BrowserRow] = []
+    private var favoriteURLKeys: Set<String> = []
     private let svnClient: any SVNClient
     private let metadataService: RepositoryMetadataService?
 
@@ -87,7 +89,8 @@ final class BrowserViewModel {
         endSearchMode(restoreRows: false)
         backStack = []
         forwardStack = []
-        try await load(url: initialURL ?? session.baseURL, clearRows: true)
+        try? await reloadFavorites()
+        try await load(url: initialURL ?? session.baseURL, clearRows: true, policy: .preferCache)
     }
 
     func disconnect(profileID: UUID) {
@@ -103,6 +106,8 @@ final class BrowserViewModel {
         isCancellable = false
         activityText = nil
         noticeText = nil
+        directoryCachedAt = nil
+        favoriteURLKeys = []
         endSearchMode(restoreRows: false)
         onChange?()
     }
@@ -114,7 +119,7 @@ final class BrowserViewModel {
         backStack.append(currentURL)
         forwardStack.removeAll()
         do {
-            try await load(url: destination, clearRows: true)
+            try await load(url: destination, clearRows: true, policy: .preferCache)
         } catch {
             _ = backStack.popLast()
             throw error
@@ -126,25 +131,28 @@ final class BrowserViewModel {
         backStack.append(currentURL)
         forwardStack.removeAll()
         endSearchMode(restoreRows: false)
-        try await load(url: url, clearRows: true)
+        try await load(url: url, clearRows: true, policy: .preferCache)
     }
 
     func goBack() async throws {
         guard let destination = backStack.popLast(), let currentURL else { return }
         forwardStack.append(currentURL)
-        try await load(url: destination, clearRows: true)
+        try await load(url: destination, clearRows: true, policy: .preferCache)
     }
 
     func goForward() async throws {
         guard let destination = forwardStack.popLast(), let currentURL else { return }
         backStack.append(currentURL)
-        try await load(url: destination, clearRows: true)
+        try await load(url: destination, clearRows: true, policy: .preferCache)
     }
 
     func refresh() async throws {
-        guard let currentURL else { return }
+        guard let session, let currentURL else { return }
         endSearchMode(restoreRows: false)
-        try await load(url: currentURL, clearRows: false)
+        try await load(url: currentURL, clearRows: false, policy: .reload)
+        noticeText = "目录缓存已刷新"
+        onRepositoryChanged?(session.profileID, currentURL)
+        onChange?()
     }
 
     var canGoBack: Bool { !backStack.isEmpty && !isBusy }
@@ -249,7 +257,6 @@ final class BrowserViewModel {
                 overwrite: true
             )
         }
-        try? await recordRecent(row: row, revision: effectiveRevision)
         return cacheURL
     }
 
@@ -262,15 +269,31 @@ final class BrowserViewModel {
             kind: row.kind == .directory ? .directory : .file,
             revision: row.revision
         )
+        if isFavorite {
+            favoriteURLKeys.insert(row.url.absoluteString)
+        } else {
+            favoriteURLKeys.remove(row.url.absoluteString)
+        }
         noticeText = isFavorite ? "已添加到收藏" : "已从收藏移除"
         onMetadataChanged?()
         onChange?()
         return isFavorite
     }
 
-    func isFavorite(_ row: BrowserRow) async throws -> Bool {
-        guard let session, let metadataService else { return false }
-        return try await metadataService.isFavorite(profileID: session.profileID, url: row.url)
+    func isFavorite(_ row: BrowserRow) -> Bool {
+        favoriteURLKeys.contains(row.url.absoluteString)
+    }
+
+    func reloadFavorites() async throws {
+        guard let session, let metadataService else {
+            favoriteURLKeys = []
+            return
+        }
+        favoriteURLKeys = Set(
+            try await metadataService.favorites()
+                .filter { $0.profileID == session.profileID }
+                .map { $0.url.absoluteString }
+        )
     }
 
     func refreshSearchIndex() async throws {
@@ -358,9 +381,9 @@ final class BrowserViewModel {
                 options: session.options
             )
         }
+        await invalidateDirectoryCache(profileID: session.profileID)
         try await refresh()
         showWriteSuccess("文件夹已创建", result: result)
-        onRepositoryChanged?(session.profileID)
         return result
     }
 
@@ -376,10 +399,11 @@ final class BrowserViewModel {
                 options: session.options
             )
         }
+        await invalidateDirectoryCache(profileID: session.profileID)
         try await refresh()
         try? await metadataService?.movePaths(profileID: session.profileID, from: sourceURL, to: destinationURL)
+        try? await reloadFavorites()
         showWriteSuccess("重命名完成", result: result)
-        onRepositoryChanged?(session.profileID)
         onMetadataChanged?()
         return result
     }
@@ -394,10 +418,10 @@ final class BrowserViewModel {
                 options: session.options
             )
         }
+        await invalidateDirectoryCache(profileID: session.profileID)
         try await refresh()
         try? await metadataService?.markFavoritesUnavailable(profileID: session.profileID, atOrBelow: deletedURL)
         showWriteSuccess("删除完成", result: result)
-        onRepositoryChanged?(session.profileID)
         onMetadataChanged?()
         return result
     }
@@ -421,9 +445,9 @@ final class BrowserViewModel {
                 options: session.options
             )
         }
+        await invalidateDirectoryCache(profileID: session.profileID)
         try await refresh()
         showWriteSuccess("上传完成", result: result)
-        onRepositoryChanged?(session.profileID)
         return result
     }
 
@@ -438,9 +462,9 @@ final class BrowserViewModel {
                 options: session.options
             )
         }
+        await invalidateDirectoryCache(profileID: session.profileID)
         try await refresh()
         showWriteSuccess("替换完成", result: result)
-        onRepositoryChanged?(session.profileID)
         return result
     }
 
@@ -460,8 +484,18 @@ final class BrowserViewModel {
         return ([session.displayName] + relative).joined(separator: " / ")
     }
 
-    private func load(url: URL, clearRows: Bool) async throws {
+    private enum DirectoryLoadPolicy: Equatable {
+        case preferCache
+        case reload
+    }
+
+    private func load(url: URL, clearRows: Bool, policy: DirectoryLoadPolicy) async throws {
         guard let session else { return }
+        if policy == .preferCache,
+           let snapshot = try? await metadataService?.directoryCache(profileID: session.profileID, url: url) {
+            applyDirectoryEntries(snapshot.entries, url: url, cachedAt: snapshot.cachedAt)
+            return
+        }
         let previousRows = rows
         let previousURL = currentURL
         let previousState = state
@@ -475,16 +509,14 @@ final class BrowserViewModel {
 
         do {
             let entries = try await svnClient.list(url: url, options: session.options)
-            rows = entries.map { BrowserRow(entry: $0, parentURL: url) }
-            browsingRows = rows
-            isShowingSearchResults = false
-            currentURL = url
-            state = .loaded(url)
-            isBusy = false
-            isCancellable = false
-            activityText = nil
-            onChange?()
-            try? await recordRecentDirectory(url: url)
+            let cachedAt = Date()
+            try? await metadataService?.replaceDirectoryCache(
+                profileID: session.profileID,
+                url: url,
+                entries: entries,
+                cachedAt: cachedAt
+            )
+            applyDirectoryEntries(entries, url: url, cachedAt: cachedAt)
         } catch is CancellationError {
             rows = previousRows
             currentURL = previousURL
@@ -502,6 +534,24 @@ final class BrowserViewModel {
             onChange?()
             throw error
         }
+    }
+
+    private func applyDirectoryEntries(_ entries: [SVNListEntry], url: URL, cachedAt: Date) {
+        rows = entries.map { BrowserRow(entry: $0, parentURL: url) }
+        browsingRows = rows
+        isShowingSearchResults = false
+        currentURL = url
+        directoryCachedAt = cachedAt
+        state = .loaded(url)
+        isBusy = false
+        isCancellable = false
+        activityText = nil
+        noticeText = nil
+        onChange?()
+    }
+
+    private func invalidateDirectoryCache(profileID: UUID) async {
+        try? await metadataService?.clearDirectoryCache(profileID: profileID)
     }
 
     private func performActivity<Result: Sendable>(
@@ -533,33 +583,6 @@ final class BrowserViewModel {
     private func showWriteSuccess(_ message: String, result: SVNWriteResult) {
         noticeText = result.revision.map { "\(message) · r\($0)" } ?? message
         onChange?()
-    }
-
-    private func recordRecentDirectory(url: URL) async throws {
-        guard let session, let metadataService else { return }
-        let name = url == session.baseURL
-            ? session.displayName
-            : url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
-        try await metadataService.recordRecent(
-            profileID: session.profileID,
-            url: url,
-            name: name,
-            kind: .directory,
-            revision: nil
-        )
-        onMetadataChanged?()
-    }
-
-    private func recordRecent(row: BrowserRow, revision: Int?) async throws {
-        guard let session, let metadataService else { return }
-        try await metadataService.recordRecent(
-            profileID: session.profileID,
-            url: row.url,
-            name: row.name,
-            kind: row.kind == .directory ? .directory : .file,
-            revision: revision
-        )
-        onMetadataChanged?()
     }
 
     private func endSearchMode(restoreRows: Bool) {
@@ -597,7 +620,10 @@ final class BrowserViewModel {
         case .loading:
             return "正在连接并读取目录…"
         case let .loaded(url):
-            return rows.isEmpty ? "这个文件夹是空的" : "已连接 · \(url.host ?? session?.displayName ?? url.lastPathComponent) · \(rows.count) 项"
+            let updated = directoryCachedAt?.formatted(date: .abbreviated, time: .shortened) ?? "未知"
+            return rows.isEmpty
+                ? "这个文件夹是空的 · 缓存更新于 \(updated)"
+                : "已连接 · \(url.host ?? session?.displayName ?? url.lastPathComponent) · \(rows.count) 项 · 缓存更新于 \(updated)"
         case let .failed(message):
             return "连接失败 · \(message)"
         }

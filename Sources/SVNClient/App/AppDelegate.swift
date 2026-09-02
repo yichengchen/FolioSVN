@@ -35,13 +35,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         applicationMenu.addItem(.separator())
-        let settingsItem = applicationMenu.addItem(
-            withTitle: "设置…",
-            action: #selector(openSettings),
-            keyEquivalent: ","
-        )
-        settingsItem.target = self
-        applicationMenu.addItem(.separator())
         applicationMenu.addItem(withTitle: "隐藏 SVN Client", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         applicationMenu.addItem(withTitle: "隐藏其他", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
             .keyEquivalentModifierMask = [.command, .option]
@@ -66,9 +59,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(editItem)
 
         NSApp.mainMenu = mainMenu
-    }
-
-    @objc private func openSettings() {
-        coordinator?.showSettings()
     }
 }

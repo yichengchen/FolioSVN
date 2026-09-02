@@ -161,7 +161,7 @@ extension MainWindowController: NSToolbarDelegate {
         case ToolbarIdentifier.refresh:
             return makeToolbarItem(
                 identifier: itemIdentifier,
-                label: "刷新",
+                label: "刷新缓存",
                 symbolName: "arrow.clockwise",
                 action: #selector(refreshRepository)
             )

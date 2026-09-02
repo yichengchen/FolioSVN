@@ -21,50 +21,6 @@ final class RepositoryMetadataStoreTests: XCTestCase {
         XCTAssertTrue(remainingFavorites.isEmpty)
     }
 
-    func testRecentItemsDeduplicateAndKeepNewestFifty() async throws {
-        let store = try RepositoryMetadataStore(inMemory: ())
-        let profileID = UUID()
-        let baseURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
-
-        for index in 0..<55 {
-            try await store.recordRecent(
-                RecentRepositoryItem(
-                    id: UUID(),
-                    profileID: profileID,
-                    url: baseURL.appendingPathComponent("文件\(index).txt"),
-                    name: "文件\(index).txt",
-                    kind: .file,
-                    lastKnownRevision: index,
-                    visitedAt: Date(timeIntervalSince1970: TimeInterval(index))
-                ),
-                maximumCount: 50
-            )
-        }
-
-        var items = try await store.recentItems(limit: 100)
-        XCTAssertEqual(items.count, 50)
-        XCTAssertEqual(items.first?.name, "文件54.txt")
-        XCTAssertNil(items.first(where: { $0.name == "文件0.txt" }))
-
-        let revisited = try XCTUnwrap(items.last)
-        try await store.recordRecent(
-            RecentRepositoryItem(
-                id: UUID(),
-                profileID: profileID,
-                url: revisited.url,
-                name: revisited.name,
-                kind: revisited.kind,
-                lastKnownRevision: 999,
-                visitedAt: Date(timeIntervalSince1970: 1_000)
-            ),
-            maximumCount: 50
-        )
-        items = try await store.recentItems(limit: 100)
-        XCTAssertEqual(items.count, 50)
-        XCTAssertEqual(items.first?.url, revisited.url)
-        XCTAssertEqual(items.first?.lastKnownRevision, 999)
-    }
-
     func testSearchIsCaseInsensitiveAndCanLimitToCurrentDirectoryTree() async throws {
         let store = try RepositoryMetadataStore(inMemory: ())
         let profileID = UUID()
@@ -101,7 +57,7 @@ final class RepositoryMetadataStoreTests: XCTestCase {
         XCTAssertEqual(currentResults.entries.map(\.name), ["API-Guide.txt"])
     }
 
-    func testMoveUpdatesFavoriteRecentAndIndexedDescendantPaths() async throws {
+    func testMoveUpdatesFavoriteAndIndexedDescendantPaths() async throws {
         let store = try RepositoryMetadataStore(inMemory: ())
         let profileID = UUID()
         let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
@@ -113,13 +69,6 @@ final class RepositoryMetadataStoreTests: XCTestCase {
             lastKnownRevision: 3, isAvailable: true, createdAt: .now, updatedAt: .now
         )
         try await store.upsertFavorite(favorite)
-        try await store.recordRecent(
-            RecentRepositoryItem(
-                id: UUID(), profileID: profileID, url: sourceURL, name: "旧目录", kind: .directory,
-                lastKnownRevision: 3, visitedAt: .now
-            ),
-            maximumCount: 50
-        )
         try await store.replaceSearchIndex(
             profileID: profileID,
             rootURL: rootURL,
@@ -134,8 +83,6 @@ final class RepositoryMetadataStoreTests: XCTestCase {
             movedFavorites.first?.url,
             destinationURL.appendingPathComponent("说明.txt")
         )
-        let movedRecents = try await store.recentItems(limit: 50)
-        XCTAssertEqual(movedRecents.first?.url, destinationURL)
         let results = try await store.searchIndex(
             profileID: profileID,
             rootURL: rootURL,
@@ -147,6 +94,42 @@ final class RepositoryMetadataStoreTests: XCTestCase {
         try await store.markFavoritesUnavailable(profileID: profileID, atOrBelow: destinationURL)
         let unavailableFavorites = try await store.favorites()
         XCTAssertEqual(unavailableFavorites.first?.isAvailable, false)
+    }
+
+    func testDirectoryCachePersistsOrderReplacesEntriesAndCanBeCleared() async throws {
+        let store = try RepositoryMetadataStore(inMemory: ())
+        let profileID = UUID()
+        let url = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        let cachedAt = Date(timeIntervalSince1970: 500)
+        let initialEntries = [
+            SVNListEntry(name: "资料", kind: .directory, size: nil, revision: 3, author: "a", updatedAt: nil),
+            SVNListEntry(name: "说明.txt", kind: .file, size: 12, revision: 4, author: "b", updatedAt: cachedAt)
+        ]
+
+        try await store.replaceDirectoryCache(
+            profileID: profileID,
+            url: url,
+            entries: initialEntries,
+            cachedAt: cachedAt
+        )
+        let initialSnapshot = try await store.directoryCache(profileID: profileID, url: url)
+        XCTAssertEqual(initialSnapshot, DirectoryCacheSnapshot(entries: initialEntries, cachedAt: cachedAt))
+
+        let replacement = [SVNListEntry(
+            name: "新版.txt", kind: .file, size: 20, revision: 5, author: nil, updatedAt: nil
+        )]
+        try await store.replaceDirectoryCache(
+            profileID: profileID,
+            url: url,
+            entries: replacement,
+            cachedAt: cachedAt.addingTimeInterval(1)
+        )
+        let replacedSnapshot = try await store.directoryCache(profileID: profileID, url: url)
+        XCTAssertEqual(replacedSnapshot?.entries, replacement)
+
+        try await store.clearDirectoryCache(profileID: profileID)
+        let clearedSnapshot = try await store.directoryCache(profileID: profileID, url: url)
+        XCTAssertNil(clearedSnapshot)
     }
 
     func testMetadataMigrationsShareTheApplicationDatabaseWithProfileMigrations() async throws {

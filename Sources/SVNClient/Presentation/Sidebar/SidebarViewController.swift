@@ -10,8 +10,8 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation {
     var onDeleteRepository: ((UUID) -> Void)?
     var onSelectSavedItem: ((UUID, URL, String, SavedRepositoryItemKind, Int?, UUID?) -> Void)?
     var onRemoveFavorite: ((UUID) -> Void)?
-    var onClearRecentItems: (() -> Void)?
 
+    private let stateStore: SidebarStateStore
     private let scrollView = NSScrollView()
     private let outlineView = NSOutlineView()
     private let footerView = NSVisualEffectView()
@@ -19,7 +19,18 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation {
     private var rootNodes = SidebarItem.roots(profiles: [])
     private var profiles: [RepositoryProfile] = []
     private var favorites: [FavoriteRepositoryItem] = []
-    private var recentItems: [RecentRepositoryItem] = []
+    private var isRestoringState = false
+    private var shouldActivateRestoredSelection = false
+
+    init(userDefaults: UserDefaults = .standard) {
+        stateStore = SidebarStateStore(userDefaults: userDefaults)
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
     override func loadView() {
         let backgroundView = NSVisualEffectView()
@@ -71,7 +82,6 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation {
         menu.addItem(withTitle: "移除服务器", action: #selector(deleteRepository), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "从收藏移除", action: #selector(removeFavorite), keyEquivalent: "")
-        menu.addItem(withTitle: "清空最近访问", action: #selector(clearRecentItems), keyEquivalent: "")
         for item in menu.items { item.target = self }
         outlineView.menu = menu
     }
@@ -127,16 +137,6 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation {
         onRemoveFavorite?(favorite.id)
     }
 
-    @objc private func clearRecentItems() {
-        guard let item = selectedSidebarItem else { return }
-        switch item.kind {
-        case .recentsRoot, .recent:
-            onClearRecentItems?()
-        default:
-            break
-        }
-    }
-
     private var selectedSidebarItem: SidebarItem? {
         guard outlineView.selectedRow >= 0 else { return nil }
         return outlineView.item(atRow: outlineView.selectedRow) as? SidebarItem
@@ -157,64 +157,92 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation {
         case #selector(removeFavorite):
             if case .favorite = item.kind { return true }
             return false
-        case #selector(clearRecentItems):
-            switch item.kind {
-            case .recentsRoot, .recent: return !recentItems.isEmpty
-            default: return false
-            }
         default:
             return false
         }
     }
 
-    func setRepositoryProfiles(_ profiles: [RepositoryProfile]) {
+    func setRepositoryProfiles(_ profiles: [RepositoryProfile], activateRestoredSelection: Bool = false) {
         self.profiles = profiles
+        shouldActivateRestoredSelection = activateRestoredSelection
         rebuildRoots()
     }
 
-    func setMetadata(favorites: [FavoriteRepositoryItem], recentItems: [RecentRepositoryItem]) {
+    func setMetadata(favorites: [FavoriteRepositoryItem]) {
         self.favorites = favorites
-        self.recentItems = recentItems
-        guard !rootNodes.isEmpty else {
+        guard let commonRoot = rootNodes.first(where: { $0.stateKey == "group.common" }),
+              let favoritesRoot = commonRoot.children.first(where: { $0.stateKey == "favorites.root" }) else {
             rebuildRoots()
             return
         }
-        let commonRoot = SidebarItem.roots(
+        let updatedCommonRoot = SidebarItem.roots(
             profiles: profiles,
-            favorites: favorites,
-            recentItems: recentItems
+            favorites: favorites
         )[0]
-        rootNodes[0] = commonRoot
-        outlineView.reloadData()
-        outlineView.expandItem(commonRoot)
-        commonRoot.children.forEach { outlineView.expandItem($0) }
+        favoritesRoot.children = updatedCommonRoot.children[0].children
+        outlineView.reloadItem(favoritesRoot, reloadChildren: true)
+        restoreOutlineState()
     }
 
     private func rebuildRoots() {
-        rootNodes = SidebarItem.roots(profiles: profiles, favorites: favorites, recentItems: recentItems)
+        rootNodes = SidebarItem.roots(profiles: profiles, favorites: favorites)
         outlineView.reloadData()
-        for rootNode in rootNodes {
-            outlineView.expandItem(rootNode)
-        }
-        if let commonGroup = rootNodes.first(where: { $0.title == "常用" }) {
-            commonGroup.children.forEach { outlineView.expandItem($0) }
-        }
-        if profiles.count == 1,
-           let serverGroup = rootNodes.first(where: { $0.title == "SVN 服务器" }),
-           let repository = serverGroup.children.first {
-            outlineView.expandItem(repository)
+        restoreOutlineState()
+    }
+
+    func invalidateDirectory(profileID: UUID, url: URL) {
+        guard let item = findItem(where: {
+            $0.repositoryLocation?.profileID == profileID && $0.repositoryLocation?.url == url
+        }) else { return }
+        item.children = [SidebarItem.loadingPlaceholder()]
+        item.hasLoadedChildren = false
+        outlineView.reloadItem(item, reloadChildren: true)
+        if stateStore.expandedKeys.contains(item.stateKey ?? "") {
+            outlineView.expandItem(item)
+            loadDirectoryChildren(for: item)
         }
     }
 
-    func invalidateDirectories(profileID: UUID) {
-        guard let serverGroup = rootNodes.first(where: { $0.title == "SVN 服务器" }),
-              let repository = serverGroup.children.first(where: { $0.repositoryProfileID == profileID }) else { return }
-        repository.children = [SidebarItem.loadingPlaceholder()]
-        repository.hasLoadedChildren = false
-        outlineView.reloadItem(repository, reloadChildren: true)
-        if outlineView.isItemExpanded(repository) {
-            loadDirectoryChildren(for: repository)
+    private func restoreOutlineState() {
+        isRestoringState = true
+        restoreExpansion(in: rootNodes)
+        let restoredItem = restoreSelectionIfAvailable()
+        isRestoringState = false
+        if shouldActivateRestoredSelection, let restoredItem {
+            shouldActivateRestoredSelection = false
+            activate(restoredItem)
         }
+    }
+
+    private func restoreExpansion(in items: [SidebarItem]) {
+        for item in items {
+            if let key = item.stateKey, stateStore.expandedKeys.contains(key) {
+                outlineView.expandItem(item)
+            }
+            if item.hasLoadedChildren {
+                restoreExpansion(in: item.children)
+            }
+        }
+    }
+
+    private func restoreSelectionIfAvailable() -> SidebarItem? {
+        guard let key = stateStore.selectedItemKey,
+              let selected = findItem(where: { $0.stateKey == key }) else { return nil }
+        let row = outlineView.row(forItem: selected)
+        guard row >= 0 else { return nil }
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        return selected
+    }
+
+    private func findItem(where predicate: (SidebarItem) -> Bool) -> SidebarItem? {
+        func search(_ items: [SidebarItem]) -> SidebarItem? {
+            for item in items {
+                if predicate(item) { return item }
+                if let match = search(item.children) { return match }
+            }
+            return nil
+        }
+        return search(rootNodes)
     }
 }
 
@@ -240,7 +268,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
         guard let sidebarItem = item as? SidebarItem else { return false }
         switch sidebarItem.kind {
-        case .repository, .directory, .favorite, .recent, .recentsRoot: return true
+        case .repository, .directory, .favorite: return true
         default: return false
         }
     }
@@ -254,6 +282,12 @@ extension SidebarViewController: NSOutlineViewDelegate {
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard outlineView.selectedRow >= 0,
               let item = outlineView.item(atRow: outlineView.selectedRow) as? SidebarItem else { return }
+        stateStore.setSelected(key: item.stateKey)
+        if isRestoringState { return }
+        activate(item)
+    }
+
+    private func activate(_ item: SidebarItem) {
         switch item.kind {
         case .repository:
             if let location = item.repositoryLocation {
@@ -263,7 +297,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
             if let location = item.repositoryLocation {
                 onSelectDirectory?(location.profileID, location.url)
             }
-        case .favorite, .recent:
+        case .favorite:
             if let saved = item.savedItem {
                 onSelectSavedItem?(
                     saved.profileID,
@@ -274,8 +308,6 @@ extension SidebarViewController: NSOutlineViewDelegate {
                     saved.favoriteID
                 )
             }
-        case .recentsRoot:
-            break
         default:
             break
         }
@@ -284,6 +316,20 @@ extension SidebarViewController: NSOutlineViewDelegate {
     func outlineViewItemWillExpand(_ notification: Notification) {
         guard let item = notification.userInfo?["NSObject"] as? SidebarItem else { return }
         loadDirectoryChildren(for: item)
+    }
+
+    func outlineViewItemDidExpand(_ notification: Notification) {
+        guard !isRestoringState,
+              let item = notification.userInfo?["NSObject"] as? SidebarItem,
+              let key = item.stateKey else { return }
+        stateStore.setExpanded(true, key: key)
+    }
+
+    func outlineViewItemDidCollapse(_ notification: Notification) {
+        guard !isRestoringState,
+              let item = notification.userInfo?["NSObject"] as? SidebarItem,
+              let key = item.stateKey else { return }
+        stateStore.setExpanded(false, key: key)
     }
 
     private func loadDirectoryChildren(for item: SidebarItem) {
@@ -313,7 +359,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
             }
             item.isLoadingChildren = false
             outlineView.reloadItem(item, reloadChildren: true)
-            outlineView.expandItem(item)
+            self.restoreOutlineState()
         }
     }
 

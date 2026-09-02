@@ -188,7 +188,7 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertEqual(secondRecursiveListCount, 1, "Subsequent searches must use the local index")
     }
 
-    func testFavoritesAndRecentAccessArePersistedLocally() async throws {
+    func testFavoritesArePersistedAndReflectedSynchronouslyInTheContextMenuState() async throws {
         let store = try RepositoryMetadataStore(inMemory: ())
         let metadata = RepositoryMetadataService(store: store)
         let client = SearchSVNClient()
@@ -201,15 +201,44 @@ final class BrowserViewModelTests: XCTestCase {
 
         try await viewModel.connect(profile: profile, password: nil)
         let file = try XCTUnwrap(viewModel.rows.first(where: { $0.name == "README.txt" }))
+        XCTAssertFalse(viewModel.isFavorite(file))
         let wasAdded = try await viewModel.toggleFavorite(file)
         XCTAssertTrue(wasAdded)
-        _ = try await viewModel.localURLForOpening(file)
+        XCTAssertTrue(viewModel.isFavorite(file))
 
         let favorites = try await metadata.favorites()
-        let recents = try await metadata.recentItems()
         XCTAssertEqual(favorites.map(\.url), [file.url])
-        XCTAssertTrue(recents.contains(where: { $0.url == rootURL && $0.kind == .directory }))
-        XCTAssertTrue(recents.contains(where: { $0.url == file.url && $0.kind == .file }))
+
+        let wasRemoved = try await viewModel.toggleFavorite(file)
+        XCTAssertFalse(wasRemoved)
+        XCTAssertFalse(viewModel.isFavorite(file))
+    }
+
+    func testDirectoryNavigationUsesCacheAndRefreshForcesOneServerReload() async throws {
+        let store = try RepositoryMetadataStore(inMemory: ())
+        let metadata = RepositoryMetadataService(store: store)
+        let client = CachingSVNClient()
+        let viewModel = BrowserViewModel(svnClient: client, metadataService: metadata)
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        let profile = RepositoryProfile(
+            id: UUID(), displayName: "公司文档", baseURL: rootURL, username: "",
+            certificatePolicy: .strict, createdAt: .now, updatedAt: .now
+        )
+
+        try await viewModel.connect(profile: profile, password: nil)
+        let directory = try XCTUnwrap(viewModel.rows.first(where: { $0.kind == .directory }))
+        try await viewModel.openDirectory(directory)
+        try await viewModel.goBack()
+
+        let countsBeforeRefresh = await client.callCounts
+        XCTAssertEqual(countsBeforeRefresh[rootURL.absoluteString], 1)
+        XCTAssertEqual(countsBeforeRefresh[directory.url.absoluteString], 1)
+
+        try await viewModel.refresh()
+        let countsAfterRefresh = await client.callCounts
+        XCTAssertEqual(countsAfterRefresh[rootURL.absoluteString], 2)
+        XCTAssertTrue(viewModel.rows.contains(where: { $0.name == "刷新后.txt" }))
+        XCTAssertEqual(viewModel.noticeText, "目录缓存已刷新")
     }
 }
 
@@ -346,5 +375,30 @@ private actor SearchSVNClient: SVNClient {
             withIntermediateDirectories: true
         )
         try Data("test".utf8).write(to: destinationURL)
+    }
+}
+
+private actor CachingSVNClient: SVNClient {
+    private(set) var callCounts: [String: Int] = [:]
+
+    func version() async throws -> String { "1.14.5" }
+
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        callCounts[url.absoluteString, default: 0] += 1
+        if url.lastPathComponent == "资料" {
+            return [SVNListEntry(name: "文档.txt", kind: .file, size: 1, revision: 1, author: nil, updatedAt: nil)]
+        }
+        let rootCallCount = callCounts[url.absoluteString, default: 0]
+        return [
+            SVNListEntry(name: "资料", kind: .directory, size: nil, revision: 1, author: nil, updatedAt: nil),
+            SVNListEntry(
+                name: rootCallCount > 1 ? "刷新后.txt" : "初始.txt",
+                kind: .file,
+                size: 1,
+                revision: rootCallCount,
+                author: nil,
+                updatedAt: nil
+            )
+        ]
     }
 }

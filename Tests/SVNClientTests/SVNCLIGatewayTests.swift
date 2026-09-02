@@ -21,6 +21,31 @@ final class SVNCLIGatewayTests: XCTestCase {
         XCTAssertEqual(runner.calls, [["svn", "--version", "--quiet"]])
     }
 
+    func testBundledRuntimeInjectsItsOwnCABundle() async throws {
+        let runtime = FileManager.default.temporaryDirectory
+            .appendingPathComponent("svn-runtime-\(UUID().uuidString)")
+        let executable = runtime.appendingPathComponent("bin/svn")
+        let caBundle = runtime.appendingPathComponent("etc/ssl/cert.pem")
+        try FileManager.default.createDirectory(
+            at: executable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: caBundle.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(FileManager.default.createFile(atPath: caBundle.path, contents: Data("certificate".utf8)))
+        defer { try? FileManager.default.removeItem(at: runtime) }
+
+        let runner = MockSVNCommandRunner(output: .success(stdout: "1.14.5\n"))
+        let gateway = SVNCLIGateway(runner: runner, executableURL: executable)
+
+        _ = try await gateway.version()
+
+        XCTAssertEqual(runner.invocations.single?.environment?["SSL_CERT_FILE"], caBundle.path)
+        XCTAssertNil(runner.invocations.single?.environment?["SSL_CERT_DIR"])
+    }
+
     func testListMapsRealXMLFixtureAndUsesSafeArguments() async throws {
         let fixtureURL = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "svn-list", withExtension: "xml"))
         let fixture = try Data(contentsOf: fixtureURL)
@@ -169,6 +194,7 @@ final class SVNCLIGatewayTests: XCTestCase {
 private final class MockSVNCommandRunner: SVNCommandRunning, @unchecked Sendable {
     struct Invocation {
         let arguments: [String]
+        let environment: [String: String]?
         let standardInput: Data?
     }
 
@@ -208,7 +234,7 @@ private final class MockSVNCommandRunner: SVNCommandRunning, @unchecked Sendable
     }
 
     func run(executableURL: URL, arguments: [String], environment: [String: String]?, standardInput: Data?) async throws -> SVNProcessOutput {
-        invocations.append(Invocation(arguments: arguments, standardInput: standardInput))
+        invocations.append(Invocation(arguments: arguments, environment: environment, standardInput: standardInput))
         return SVNProcessOutput(standardOutput: output.standardOutput, standardError: output.standardError, exitStatus: output.status)
     }
 }

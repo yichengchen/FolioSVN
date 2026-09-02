@@ -8,7 +8,6 @@ final class MainCoordinator {
     private let metadataService: RepositoryMetadataService
     private weak var sidebarViewController: SidebarViewController?
     private weak var browserViewModel: BrowserViewModel?
-    private var settingsWindowController: NSWindowController?
 
     init(
         svnClient: any SVNClient,
@@ -38,8 +37,8 @@ final class MainCoordinator {
     func start() {
         let sidebarViewController = SidebarViewController()
         let browserViewModel = BrowserViewModel(svnClient: svnClient, metadataService: metadataService)
-        browserViewModel.onRepositoryChanged = { [weak sidebarViewController] profileID in
-            sidebarViewController?.invalidateDirectories(profileID: profileID)
+        browserViewModel.onRepositoryChanged = { [weak sidebarViewController] profileID, url in
+            sidebarViewController?.invalidateDirectory(profileID: profileID, url: url)
         }
         browserViewModel.onMetadataChanged = { [weak self] in
             Task { await self?.reloadMetadata() }
@@ -62,7 +61,14 @@ final class MainCoordinator {
         sidebarViewController.onLoadDirectories = { [weak self] profileID, url in
             guard let self,
                   let connection = try await profileService.connection(profileID: profileID) else { return [] }
-            return try await svnClient.list(url: url, options: connection.requestOptions)
+            let entries: [SVNListEntry]
+            if let snapshot = try? await metadataService.directoryCache(profileID: profileID, url: url) {
+                entries = snapshot.entries
+            } else {
+                entries = try await svnClient.list(url: url, options: connection.requestOptions)
+                try? await metadataService.replaceDirectoryCache(profileID: profileID, url: url, entries: entries)
+            }
+            return entries
                 .filter { $0.kind == .directory }
                 .map { entry in
                     (
@@ -91,19 +97,17 @@ final class MainCoordinator {
                 favoriteID: favoriteID
             )
         }
-        sidebarViewController.onRemoveFavorite = { [weak self] favoriteID in
+        sidebarViewController.onRemoveFavorite = { [weak self, weak browserViewModel] favoriteID in
             Task { [weak self] in
                 guard let self else { return }
                 do {
                     try await metadataService.removeFavorite(id: favoriteID)
+                    try? await browserViewModel?.reloadFavorites()
                     await reloadMetadata()
                 } catch {
                     presentError(title: "无法移除收藏", error: error)
                 }
             }
-        }
-        sidebarViewController.onClearRecentItems = { [weak self] in
-            self?.confirmClearRecentItems()
         }
         self.sidebarViewController = sidebarViewController
         self.browserViewModel = browserViewModel
@@ -114,30 +118,6 @@ final class MainCoordinator {
         Task { [weak self] in
             await self?.reloadRepositoryProfiles(presentEditorWhenEmpty: true)
         }
-    }
-
-    func showSettings() {
-        if let settingsWindowController {
-            settingsWindowController.showWindow(nil)
-            settingsWindowController.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate()
-            Task { await reloadMetadata() }
-            return
-        }
-        let viewController = SettingsViewController()
-        viewController.onClearRecentItems = { [weak self] in
-            self?.confirmClearRecentItems()
-        }
-        let window = NSWindow(contentViewController: viewController)
-        window.title = "设置"
-        window.styleMask = [.titled, .closable]
-        window.setContentSize(NSSize(width: 480, height: 220))
-        window.center()
-        let controller = NSWindowController(window: window)
-        settingsWindowController = controller
-        controller.showWindow(nil)
-        NSApp.activate()
-        Task { await reloadMetadata() }
     }
 
     private func presentRepositoryConnection(
@@ -225,7 +205,10 @@ final class MainCoordinator {
     private func reloadRepositoryProfiles(presentEditorWhenEmpty: Bool = false) async {
         do {
             let profiles = try await profileService.list()
-            sidebarViewController?.setRepositoryProfiles(profiles)
+            sidebarViewController?.setRepositoryProfiles(
+                profiles,
+                activateRestoredSelection: browserViewModel?.currentURL == nil
+            )
             await reloadMetadata()
             if presentEditorWhenEmpty,
                profiles.isEmpty,
@@ -311,37 +294,12 @@ final class MainCoordinator {
         }
     }
 
-    private func confirmClearRecentItems() {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "清空最近访问？"
-        alert.informativeText = "只会清除当前 Mac 上保存的访问记录，不会影响 SVN 仓库。"
-        alert.addButton(withTitle: "清空")
-        alert.addButton(withTitle: "取消")
-        alert.buttons.first?.hasDestructiveAction = true
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        Task { [weak self] in
-            do {
-                guard let self else { return }
-                try await metadataService.clearRecentItems()
-                await reloadMetadata()
-            } catch {
-                self?.presentError(title: "无法清空最近访问", error: error)
-            }
-        }
-    }
-
     private func reloadMetadata() async {
         do {
-            async let favorites = metadataService.favorites()
-            async let recentItems = metadataService.recentItems()
-            let loadedFavorites = try await favorites
-            let loadedRecentItems = try await recentItems
-            sidebarViewController?.setMetadata(favorites: loadedFavorites, recentItems: loadedRecentItems)
-            (settingsWindowController?.contentViewController as? SettingsViewController)?
-                .updateRecentCount(loadedRecentItems.count)
+            let loadedFavorites = try await metadataService.favorites()
+            sidebarViewController?.setMetadata(favorites: loadedFavorites)
         } catch {
-            presentError(title: "无法读取收藏与最近访问", error: error)
+            presentError(title: "无法读取收藏", error: error)
         }
     }
 

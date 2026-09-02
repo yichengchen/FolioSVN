@@ -6,9 +6,7 @@ final class SidebarItem {
         case group
         case destination
         case favoritesRoot
-        case recentsRoot
         case favorite(FavoriteRepositoryItem)
-        case recent(RecentRepositoryItem)
         case repository(UUID, URL)
         case directory(UUID, URL)
         case emptyState
@@ -48,7 +46,6 @@ final class SidebarItem {
         switch kind {
         case let .repository(profileID, _), let .directory(profileID, _): return profileID
         case let .favorite(item): return item.profileID
-        case let .recent(item): return item.profileID
         default: return nil
         }
     }
@@ -61,11 +58,22 @@ final class SidebarItem {
     }
 
     var savedItem: (profileID: UUID, url: URL, name: String, kind: SavedRepositoryItemKind, revision: Int?, favoriteID: UUID?)? {
+        guard case let .favorite(item) = kind else { return nil }
+        return (item.profileID, item.url, item.name, item.kind, item.lastKnownRevision, item.id)
+    }
+
+    var stateKey: String? {
         switch kind {
+        case .group:
+            return title == "常用" ? "group.common" : "group.repositories"
+        case .favoritesRoot:
+            return "favorites.root"
         case let .favorite(item):
-            return (item.profileID, item.url, item.name, item.kind, item.lastKnownRevision, item.id)
-        case let .recent(item):
-            return (item.profileID, item.url, item.name, item.kind, item.lastKnownRevision, nil)
+            return "favorite.\(item.id.uuidString)"
+        case let .repository(profileID, _):
+            return "repository.\(profileID.uuidString)"
+        case let .directory(profileID, url):
+            return "directory.\(profileID.uuidString).\(url.absoluteString)"
         default:
             return nil
         }
@@ -77,8 +85,7 @@ final class SidebarItem {
 
     static func roots(
         profiles: [RepositoryProfile],
-        favorites: [FavoriteRepositoryItem] = [],
-        recentItems: [RecentRepositoryItem] = []
+        favorites: [FavoriteRepositoryItem] = []
     ) -> [SidebarItem] {
         let profilesByID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
         let favoriteChildren = favorites.isEmpty
@@ -93,22 +100,11 @@ final class SidebarItem {
                     kind: .favorite(item)
                 )
             }
-        let recentChildren = recentItems.isEmpty
-            ? [SidebarItem("暂无最近访问", symbolName: "clock", kind: .emptyState)]
-            : recentItems.map { item in
-                SidebarItem(
-                    item.name,
-                    subtitle: profilesByID[item.profileID]?.displayName ?? "服务器已移除",
-                    symbolName: item.kind == .directory ? "folder" : "doc",
-                    kind: .recent(item)
-                )
-            }
         return [
             SidebarItem(
                 "常用",
                 children: [
-                    SidebarItem("我的收藏", symbolName: "star", children: favoriteChildren, kind: .favoritesRoot),
-                    SidebarItem("最近访问", symbolName: "clock", children: recentChildren, kind: .recentsRoot)
+                    SidebarItem("我的收藏", symbolName: "star", children: favoriteChildren, kind: .favoritesRoot)
                 ],
                 kind: .group
             ),

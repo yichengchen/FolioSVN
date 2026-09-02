@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test (arm64)
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      DERIVED_DATA_PATH: ${{ runner.temp }}/DerivedData
+      NSUnbufferedIO: "YES"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check build environment
+        run: |
+          test "$(uname -m)" = "arm64"
+          xcodebuild -version
+          swift --version
+
+      - name: Verify committed SVN runtime
+        run: |
+          cd Vendor/SVNRuntime
+          shasum -a 256 --check SHA256SUMS
+          cd "$GITHUB_WORKSPACE"
+          Scripts/validate-svn-runtime.sh Vendor/SVNRuntime
+
+      - name: Install XcodeGen 2.46.0
+        env:
+          XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+        run: |
+          curl \
+            --fail \
+            --location \
+            --retry 3 \
+            --silent \
+            --show-error \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Verify generated Xcode project is current
+        run: |
+          xcodegen generate
+          git diff --exit-code -- SVNClient.xcodeproj
+
+      - name: Run Debug tests
+        run: |
+          xcodebuild \
+            -project SVNClient.xcodeproj \
+            -scheme SVNClient \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            test
+
+      - name: Build Release
+        run: |
+          xcodebuild \
+            -project SVNClient.xcodeproj \
+            -scheme SVNClient \
+            -configuration Release \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Verify SVN runtime in Release app
+        run: |
+          runtime="$DERIVED_DATA_PATH/Build/Products/Release/SVNClient.app/Contents/Resources/SVNRuntime"
+          Scripts/validate-svn-runtime.sh "$runtime"

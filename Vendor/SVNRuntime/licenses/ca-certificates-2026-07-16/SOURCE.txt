@@ -1,0 +1,3 @@
+Mozilla CA certificate store
+License: MPL-2.0
+Source: https://curl.se/docs/caextract.html

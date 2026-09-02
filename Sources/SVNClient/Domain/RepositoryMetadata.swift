@@ -25,16 +25,6 @@ struct FavoriteRepositoryItem: Identifiable, Equatable, Sendable {
     var updatedAt: Date
 }
 
-struct RecentRepositoryItem: Identifiable, Equatable, Sendable {
-    let id: UUID
-    let profileID: UUID
-    var url: URL
-    var name: String
-    var kind: SavedRepositoryItemKind
-    var lastKnownRevision: Int?
-    var visitedAt: Date
-}
-
 struct SearchIndexEntry: Equatable, Sendable {
     let profileID: UUID
     let rootURL: URL
@@ -52,3 +42,7 @@ struct RepositorySearchResults: Equatable, Sendable {
     let indexedAt: Date?
 }
 
+struct DirectoryCacheSnapshot: Equatable, Sendable {
+    let entries: [SVNListEntry]
+    let cachedAt: Date
+}

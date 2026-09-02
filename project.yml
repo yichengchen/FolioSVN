@@ -5,6 +5,7 @@ options:
   xcodeVersion: "26.0"
 settings:
   base:
+    ARCHS: arm64
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
     MACOSX_DEPLOYMENT_TARGET: "26.0"
@@ -29,30 +30,27 @@ targets:
       - name: Validate bundled SVN runtime
         basedOnDependencyAnalysis: false
         script: |
-          if [ "$CONFIGURATION" = "Release" ]; then
-            SVN_RUNTIME="$SRCROOT/Vendor/SVNRuntime/bin/svn"
-            if [ ! -x "$SVN_RUNTIME" ]; then
-              echo "error: Release requires Vendor/SVNRuntime/bin/svn"
-              exit 1
-            fi
-            if otool -L "$SVN_RUNTIME" | grep -E '/opt/homebrew|/usr/local/Cellar' >/dev/null; then
-              echo "error: Bundled svn contains non-relocatable Homebrew library references"
-              exit 1
-            fi
-          fi
+          "$SRCROOT/Scripts/validate-svn-runtime.sh" "$SRCROOT/Vendor/SVNRuntime"
     postBuildScripts:
       - name: Sign bundled SVN runtime
         basedOnDependencyAnalysis: false
         script: |
-          if [ "$CONFIGURATION" = "Release" ] && [ "$CODE_SIGNING_ALLOWED" != "NO" ]; then
+          if [ "$CODE_SIGNING_ALLOWED" != "NO" ]; then
             RUNTIME_DIR="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/SVNRuntime"
             SIGN_IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
+            SIGN_OPTIONS=""
+            if [ "$SIGN_IDENTITY" != "-" ]; then
+              SIGN_OPTIONS="--options runtime"
+              if [ "$CONFIGURATION" = "Release" ]; then
+                SIGN_OPTIONS="$SIGN_OPTIONS --timestamp"
+              fi
+            fi
             if [ -d "$RUNTIME_DIR/lib" ]; then
               find "$RUNTIME_DIR/lib" -type f -name '*.dylib' -print0 | while IFS= read -r -d '' LIBRARY; do
-                codesign --force --options runtime --sign "$SIGN_IDENTITY" "$LIBRARY"
+                codesign --force $SIGN_OPTIONS --sign "$SIGN_IDENTITY" "$LIBRARY"
               done
             fi
-            codesign --force --options runtime --sign "$SIGN_IDENTITY" "$RUNTIME_DIR/bin/svn"
+            codesign --force $SIGN_OPTIONS --sign "$SIGN_IDENTITY" "$RUNTIME_DIR/bin/svn"
           fi
     sources:
       - path: Sources/SVNClient
@@ -61,12 +59,20 @@ targets:
         buildPhase: resources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.svnclient
+        PRODUCT_BUNDLE_IDENTIFIER: com.west2online.svnclient
         PRODUCT_NAME: SVNClient
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: SVN Client
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.business
+        DEVELOPMENT_TEAM: MEWHFZ92DY
         CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: YES
+      configs:
+        Debug:
+          CODE_SIGN_IDENTITY: Apple Development
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Developer ID Application
     dependencies:
       - package: SnapKit
       - package: XMLCoder

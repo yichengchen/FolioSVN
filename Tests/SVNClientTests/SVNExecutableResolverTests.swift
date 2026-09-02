@@ -9,7 +9,10 @@ final class SVNExecutableResolverTests: XCTestCase {
         }
 
         XCTAssertEqual(
-            SVNExecutableResolver.resolve(environment: ["PATH": ""])?.path,
+            SVNExecutableResolver.resolve(
+                bundle: Bundle(for: Self.self),
+                environment: ["PATH": ""]
+            )?.path,
             "/opt/homebrew/bin/svn"
         )
     }

@@ -18,7 +18,7 @@
 | 状态管理 | 显式 View Model + Swift Concurrency actor | `@MainActor` View Model 生成界面状态，actor 隔离 SVN 任务与缓存写入；不引入响应式框架 |
 | SVN 访问 | `/usr/bin/env svn` 或应用随附并签名的 SVN 二进制 | 启动时探测版本；生产发布需明确依赖策略 |
 | 结构化输出 | SVN XML 输出 + XMLCoder | `list`、`info`、`log` 优先使用 `--xml`，通过 Codable DTO 解码，避免手写通用 XML 解析器 |
-| 本地元数据 | SQLite + GRDB.swift | 收藏、最近访问、目录缓存、搜索索引、任务记录和 schema migration |
+| 本地元数据 | SQLite + GRDB.swift | 收藏、目录缓存、搜索索引、任务记录和 schema migration |
 | 凭据 | macOS Keychain + KeychainAccess | 使用轻量包装减少 Security.framework 样板代码；不进入 SQLite、UserDefaults 或日志 |
 | HTTP 网络 | Alamofire | 仅用于未来应用后端、配置、反馈或诊断上传；SVN 通信仍由 SVN Gateway 完成 |
 | 日志 | CocoaLumberjack | `DDOSLogger` 写统一日志，`DDFileLogger` 保存受控滚动文件，支持用户导出诊断包 |
@@ -64,13 +64,13 @@ Debug 阶段允许使用外部 CLI；生产版随附经过签名的固定版本�
 
 ### 4.0 AppKit 界面层
 
-主窗口使用 `NSSplitViewController`：左侧 `NSOutlineView` 展示收藏、最近访问和仓库目录树，右侧 `NSTableView` 展示当前目录内容，顶部由 `NSToolbar` 承担导航、搜索、上传和新建操作。视图全部使用代码构建，约束统一通过 SnapKit 声明；不混用 Storyboard/XIB 约束和 SnapKit 管理同一视图层级。
+主窗口使用 `NSSplitViewController`：左侧 `NSOutlineView` 展示收藏和仓库目录树，右侧 `NSTableView` 展示当前目录内容，顶部由 `NSToolbar` 承担导航、搜索、刷新、上传和新建操作。视图全部使用代码构建，约束统一通过 SnapKit 声明；不混用 Storyboard/XIB 约束和 SnapKit 管理同一视图层级。
 
 职责划分：
 
 - `MainWindowController`：恢复窗口状态、管理 toolbar、处理窗口关闭和进行中任务提示。
 - `MainCoordinator`：页面导航、sheet、设置/历史/任务窗口创建，不持有仓库业务逻辑。
-- `SidebarViewController`：目录展开、收藏和最近访问，只向 View Model 发送用户意图。
+- `SidebarViewController`：目录展开、状态恢复和收藏，只向 View Model 发送用户意图。
 - `BrowserViewController`：表格、排序、选择、右键菜单、拖放和键盘操作。
 - `BrowserViewModel`：运行在 `@MainActor`，将 Repository Browser 的结果转换为稳定的行模型和 loading/empty/error 状态。
 - `InspectorViewController`：文件信息和历史，可作为右侧检查器或独立窗口复用。
@@ -163,7 +163,7 @@ queued → preparing → running → verifying → succeeded
 本地数据库保存：
 
 - 仓库非敏感配置。
-- 收藏与最近访问。
+- 收藏。
 - 目录条目缓存。
 - 搜索索引。
 - 任务摘要和缓存清理信息。
@@ -308,7 +308,7 @@ process.arguments = ["list", repositoryURL.absoluteString, "--xml", "--non-inter
 repositoryID + normalizedPath + requestedRevision/depth
 ```
 
-- 在线打开目录时可先展示缓存，再异步刷新。
+- 已有缓存时直接展示；由用户点击刷新按钮时强制读取服务端并替换当前目录缓存。
 - 写操作成功后，使父目录、目标路径和受影响的收藏记录失效。
 - 缓存必须记录获取时间和对应 revision。
 
@@ -385,7 +385,7 @@ enum RepositoryError: Error {
 - SVN XML 的 list/info/log 解析。
 - stderr/退出码到领域错误的映射。
 - 提交说明生成和名称校验。
-- 收藏、最近访问及缓存失效规则。
+- 收藏、侧边栏状态及缓存失效规则。
 - 任务状态机与取消竞态。
 
 ### 12.2 集成测试
@@ -437,7 +437,7 @@ enum RepositoryError: Error {
 
 ### Phase 3：效率能力
 
-- 收藏、最近访问、文件名索引和搜索。
+- 收藏、目录缓存、侧边栏状态恢复、文件名索引和搜索。
 
 ### Phase 4：历史与企业增强
 

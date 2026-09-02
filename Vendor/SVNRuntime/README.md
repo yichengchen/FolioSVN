@@ -1,15 +1,25 @@
 # Bundled SVN runtime
 
-Release builds expect a relocatable, signed SVN runtime at:
+Debug and Release builds use the same relocatable, signed arm64 SVN runtime at:
 
 ```text
 Vendor/SVNRuntime/
 ├── bin/svn
-└── lib/*.dylib
+├── etc/ssl/cert.pem
+├── lib/*.dylib
+├── licenses/*
+├── BUILD-INFO.txt
+└── SHA256SUMS
 ```
 
-The directory is copied into the application Resources as `SVNRuntime`. `bin/svn` must use `@loader_path`/`@rpath` references for bundled libraries; Homebrew absolute paths are not accepted. All executables and dylibs must be built for the architectures shipped by the app and signed as nested code during distribution.
+The directory is copied into the application Resources as `SVNRuntime`. `bin/svn` and every bundled dylib use `@loader_path` references; the installed application has no Homebrew or shell-environment dependency. The committed files carry ad-hoc signatures for unsigned local builds and are re-signed as nested code by Xcode when code signing is enabled.
 
-The source archive, exact build flags, licenses, notices and checksums for the packaged version must be recorded here before a Release archive is produced. Do not commit credentials, SVN configuration, auth caches or certificates into this directory.
+Regenerate the runtime from an arm64 Homebrew installation with:
 
-Debug builds may fall back to `SVNCLIENT_SVN_PATH`, `PATH`, `/opt/homebrew/bin`, `/usr/local/bin`, or `/usr/bin`. Release builds must not rely on those locations.
+```sh
+Scripts/package-svn-runtime.sh /opt/homebrew/bin/svn
+```
+
+Homebrew is a packaging input on the developer machine only. It is not required on an end user's Mac. The script recursively copies all non-system libraries, bundles the public Mozilla CA store, rewrites load commands, collects available license and notice files, signs the result ad hoc, records checksums and validates HTTPS support. It deliberately packages the public CA source file rather than Homebrew's generated `etc/ca-certificates/cert.pem`, which may contain private enterprise or developer roots from the packaging Mac's Keychain.
+
+The application resolves this runtime before any Debug-only override or external fallback. Do not commit credentials, SVN configuration, auth caches or certificates into this directory.

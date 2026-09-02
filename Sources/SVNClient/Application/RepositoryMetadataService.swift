@@ -1,8 +1,6 @@
 import Foundation
 
 actor RepositoryMetadataService {
-    static let maximumRecentItems = 50
-
     private let store: any RepositoryMetadataStoring
 
     init(store: any RepositoryMetadataStoring) {
@@ -11,10 +9,6 @@ actor RepositoryMetadataService {
 
     func favorites() async throws -> [FavoriteRepositoryItem] {
         try await store.favorites()
-    }
-
-    func isFavorite(profileID: UUID, url: URL) async throws -> Bool {
-        try await store.favorite(profileID: profileID, url: url) != nil
     }
 
     @discardableResult
@@ -56,35 +50,6 @@ actor RepositoryMetadataService {
         try await store.markFavoritesUnavailable(profileID: profileID, atOrBelow: url)
     }
 
-    func recentItems() async throws -> [RecentRepositoryItem] {
-        try await store.recentItems(limit: Self.maximumRecentItems)
-    }
-
-    func recordRecent(
-        profileID: UUID,
-        url: URL,
-        name: String,
-        kind: SavedRepositoryItemKind,
-        revision: Int?
-    ) async throws {
-        try await store.recordRecent(
-            RecentRepositoryItem(
-                id: UUID(),
-                profileID: profileID,
-                url: url,
-                name: name,
-                kind: kind,
-                lastKnownRevision: revision,
-                visitedAt: .now
-            ),
-            maximumCount: Self.maximumRecentItems
-        )
-    }
-
-    func clearRecentItems() async throws {
-        try await store.clearRecentItems()
-    }
-
     func replaceSearchIndex(
         profileID: UUID,
         rootURL: URL,
@@ -110,6 +75,28 @@ actor RepositoryMetadataService {
 
     func movePaths(profileID: UUID, from sourceURL: URL, to destinationURL: URL) async throws {
         try await store.movePaths(profileID: profileID, from: sourceURL, to: destinationURL)
+    }
+
+    func directoryCache(profileID: UUID, url: URL) async throws -> DirectoryCacheSnapshot? {
+        try await store.directoryCache(profileID: profileID, url: url)
+    }
+
+    func replaceDirectoryCache(
+        profileID: UUID,
+        url: URL,
+        entries: [SVNListEntry],
+        cachedAt: Date = .now
+    ) async throws {
+        try await store.replaceDirectoryCache(
+            profileID: profileID,
+            url: url,
+            entries: entries,
+            cachedAt: cachedAt
+        )
+    }
+
+    func clearDirectoryCache(profileID: UUID) async throws {
+        try await store.clearDirectoryCache(profileID: profileID)
     }
 
     func deleteMetadata(profileID: UUID) async throws {

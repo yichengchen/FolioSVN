@@ -1,0 +1,98 @@
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "spdxVersion": "SPDX-2.3",
+  "name": "SBOM-SPDX-ca-certificates-2026-07-16",
+  "creationInfo": {
+    "created": "2026-07-24T07:37:02Z",
+    "creators": [
+      "Tool: https://github.com/Homebrew/brew@6.0.12"
+    ]
+  },
+  "dataLicense": "CC0-1.0",
+  "documentNamespace": "https://formulae.brew.sh/spdx/ca-certificates-2026-07-16.json",
+  "documentDescribes": [
+    "SPDXRef-Archive-ca-certificates-src",
+    "SPDXRef-Compiler",
+    "SPDXRef-Bottle-ca-certificates"
+  ],
+  "files": [
+    {
+      "SPDXID": "SPDXRef-File-ca-certificates",
+      "fileName": "cacert-2026-07-16.pem",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "3ff344e30b9b1ed2971044eabb438a08f2e2245ddb5f8ab1a3ad8b63ab4eaf91"
+        }
+      ]
+    }
+  ],
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Archive-ca-certificates-src",
+      "name": "ca-certificates",
+      "versionInfo": "2026-07-16",
+      "filesAnalyzed": false,
+      "licenseDeclared": "NOASSERTION",
+      "builtDate": "2026-07-16T03:12:01Z",
+      "licenseConcluded": "MPL-2.0",
+      "downloadLocation": "https://curl.se/ca/cacert-2026-07-16.pem",
+      "copyrightText": "NOASSERTION",
+      "externalRefs": [],
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "3ff344e30b9b1ed2971044eabb438a08f2e2245ddb5f8ab1a3ad8b63ab4eaf91"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-Compiler",
+      "name": "clang",
+      "versionInfo": "26.4",
+      "filesAnalyzed": false,
+      "licenseDeclared": "NOASSERTION",
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "downloadLocation": "NOASSERTION",
+      "checksums": [],
+      "externalRefs": []
+    },
+    {
+      "SPDXID": "SPDXRef-Bottle-ca-certificates",
+      "name": "ca-certificates",
+      "versionInfo": "2026-07-16",
+      "filesAnalyzed": false,
+      "licenseDeclared": "NOASSERTION",
+      "builtDate": "2026-07-16T05:53:48Z",
+      "licenseConcluded": "MPL-2.0",
+      "downloadLocation": "https://ghcr.io/v2/homebrew/core/ca-certificates/blobs/sha256:90e3eab7339e26e016ae74a4841fe569c4799c36fee2928bfb7bd55542fa791d",
+      "copyrightText": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceLocator": "pkg:brew/ca-certificates@2026-07-16",
+          "referenceType": "purl"
+        }
+      ],
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "90e3eab7339e26e016ae74a4841fe569c4799c36fee2928bfb7bd55542fa791d"
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-File-ca-certificates",
+      "relationshipType": "PACKAGE_OF",
+      "relatedSpdxElement": "SPDXRef-Archive-ca-certificates-src"
+    },
+    {
+      "spdxElementId": "SPDXRef-Compiler",
+      "relationshipType": "BUILD_TOOL_OF",
+      "relatedSpdxElement": "SPDXRef-Archive-ca-certificates-src"
+    }
+  ]
+}

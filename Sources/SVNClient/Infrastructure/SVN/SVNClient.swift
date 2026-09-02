@@ -194,6 +194,7 @@ final class SVNCLIGateway: SVNClient, Sendable {
     private let runner: any SVNCommandRunning
     private let executableURL: URL
     private let executablePrefix: [String]
+    private let commandEnvironment: [String: String]
 
     init(
         runner: any SVNCommandRunning = ProcessSVNCommandRunner(),
@@ -201,16 +202,34 @@ final class SVNCLIGateway: SVNClient, Sendable {
         executableName: String? = nil
     ) {
         self.runner = runner
+        let resolvedExecutableURL: URL
+        let resolvedExecutablePrefix: [String]
         if let executableURL {
-            self.executableURL = executableURL
-            self.executablePrefix = executableName.map { [$0] } ?? []
+            resolvedExecutableURL = executableURL
+            resolvedExecutablePrefix = executableName.map { [$0] } ?? []
         } else if let resolvedURL = SVNExecutableResolver.resolve() {
-            self.executableURL = resolvedURL
-            self.executablePrefix = []
+            resolvedExecutableURL = resolvedURL
+            resolvedExecutablePrefix = []
         } else {
-            self.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            self.executablePrefix = ["svn"]
+            resolvedExecutableURL = URL(fileURLWithPath: "/usr/bin/env")
+            resolvedExecutablePrefix = ["svn"]
         }
+        self.executableURL = resolvedExecutableURL
+        self.executablePrefix = resolvedExecutablePrefix
+
+        var environment = ProcessInfo.processInfo.environment.merging(
+            ["LC_ALL": "en_US.UTF-8", "LANG": "en_US.UTF-8"],
+            uniquingKeysWith: { _, new in new }
+        )
+        let bundledCABundle = resolvedExecutableURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("etc/ssl/cert.pem")
+        if FileManager.default.fileExists(atPath: bundledCABundle.path) {
+            environment["SSL_CERT_FILE"] = bundledCABundle.path
+            environment.removeValue(forKey: "SSL_CERT_DIR")
+        }
+        self.commandEnvironment = environment
     }
 
     func version() async throws -> String {
@@ -546,10 +565,7 @@ final class SVNCLIGateway: SVNClient, Sendable {
         let output = try await runner.run(
             executableURL: executableURL,
             arguments: executablePrefix + arguments,
-            environment: ProcessInfo.processInfo.environment.merging(
-                ["LC_ALL": "en_US.UTF-8", "LANG": "en_US.UTF-8"],
-                uniquingKeysWith: { _, new in new }
-            ),
+            environment: commandEnvironment,
             standardInput: standardInput
         )
         guard output.exitStatus == 0 else {
