@@ -133,6 +133,10 @@ final class RepositoryConnectionViewController: NSViewController {
         })
         grid.rowSpacing = 12
         grid.columnSpacing = 12
+        // Keep the form anchored to the dialog's content margins. Without an
+        // explicit width, NSGridView lets the label column absorb spare space,
+        // which pushes every input control unnecessarily far to the right.
+        grid.column(at: 0).width = 120
         grid.column(at: 0).xPlacement = .trailing
         grid.column(at: 1).xPlacement = .fill
 
@@ -151,7 +155,7 @@ final class RepositoryConnectionViewController: NSViewController {
         }
         warningLabel.snp.makeConstraints {
             $0.top.equalTo(grid.snp.bottom).offset(12)
-            $0.leading.equalToSuperview().inset(126)
+            $0.leading.equalToSuperview().inset(156)
             $0.trailing.equalToSuperview().inset(24)
         }
         statusLabel.snp.makeConstraints {

@@ -64,14 +64,14 @@ Debug 阶段允许使用外部 CLI；生产版随附经过签名的固定版本�
 
 ### 4.0 AppKit 界面层
 
-主窗口使用 `NSSplitViewController`：左侧 `NSOutlineView` 展示收藏和仓库目录树，右侧 `NSTableView` 展示当前目录内容，顶部由 `NSToolbar` 承担导航、搜索、刷新、上传和新建操作。视图全部使用代码构建，约束统一通过 SnapKit 声明；不混用 Storyboard/XIB 约束和 SnapKit 管理同一视图层级。
+主窗口使用 `NSSplitViewController`：左侧 `NSOutlineView` 展示收藏和仓库目录树，右侧同样使用 `NSOutlineView` 展示当前目录内容并允许文件夹原地展开，顶部由 `NSToolbar` 承担导航、搜索、刷新、上传和新建操作。视图全部使用代码构建，约束统一通过 SnapKit 声明；不混用 Storyboard/XIB 约束和 SnapKit 管理同一视图层级。
 
 职责划分：
 
 - `MainWindowController`：恢复窗口状态、管理 toolbar、处理窗口关闭和进行中任务提示。
 - `MainCoordinator`：页面导航、sheet、设置/历史/任务窗口创建，不持有仓库业务逻辑。
 - `SidebarViewController`：目录展开、状态恢复和收藏，只向 View Model 发送用户意图。
-- `BrowserViewController`：表格、排序、选择、右键菜单、拖放和键盘操作。
+- `BrowserViewController`：树形文件列表、懒加载节点、展开状态、排序、选择、右键菜单、拖放和键盘操作。
 - `BrowserViewModel`：运行在 `@MainActor`，将 Repository Browser 的结果转换为稳定的行模型和 loading/empty/error 状态。
 - `InspectorViewController`：文件信息和历史，可作为右侧检查器或独立窗口复用。
 
@@ -85,6 +85,8 @@ Debug 阶段允许使用外部 CLI；生产版随附经过签名的固定版本�
 - 获取节点信息。
 - 维护面包屑和目录树展开状态。
 - 合并缓存结果与刷新状态。
+
+右侧树节点以完整仓库 URL 作为稳定键。展开目录时只调用一次单层 `list`，优先读取 GRDB 目录缓存；加载中和失败通过临时子节点表达。界面刷新时复用 URL 相同的节点并恢复展开集合，写操作清空目录缓存后递增树数据代次，使已展开分支按新代次重新懒加载。搜索结果继续使用同一个 `NSOutlineView` 平铺显示，不允许展开。
 
 接口示例：
 

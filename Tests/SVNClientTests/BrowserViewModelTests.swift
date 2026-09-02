@@ -241,6 +241,41 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.noticeText, "目录缓存已刷新")
     }
 
+    func testTreeChildrenUseDirectoryCacheAndNestedWritesUseTheirActualParent() async throws {
+        let store = try RepositoryMetadataStore(inMemory: ())
+        let metadata = RepositoryMetadataService(store: store)
+        let client = TreeOperationsSVNClient()
+        let viewModel = BrowserViewModel(svnClient: client, metadataService: metadata)
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        let profile = RepositoryProfile(
+            id: UUID(), displayName: "公司文档", baseURL: rootURL, username: "",
+            certificatePolicy: .strict, createdAt: .now, updatedAt: .now
+        )
+        try await viewModel.connect(profile: profile, password: nil)
+        let directory = try XCTUnwrap(viewModel.rows.first)
+
+        let firstChildren = try await viewModel.rows(in: directory.url)
+        let secondChildren = try await viewModel.rows(in: directory.url)
+
+        XCTAssertEqual(firstChildren, secondChildren)
+        let directoryListCount = await client.listCount(for: directory.url)
+        XCTAssertEqual(directoryListCount, 1)
+        let nestedFile = try XCTUnwrap(firstChildren.first)
+        _ = try await viewModel.rename(nestedFile, to: "新版.txt", message: "重命名")
+        let move = await client.lastMove
+        XCTAssertEqual(move?.sourceURL, directory.url.appendingPathComponent("旧版.txt"))
+        XCTAssertEqual(move?.destinationURL, directory.url.appendingPathComponent("新版.txt"))
+
+        let localFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tree-upload-\(UUID().uuidString).txt")
+        try Data("upload".utf8).write(to: localFile)
+        defer { try? FileManager.default.removeItem(at: localFile) }
+        _ = try await viewModel.upload(files: [localFile], to: directory.url, message: "上传")
+        let uploadDirectory = await client.lastUploadDirectory
+        XCTAssertEqual(uploadDirectory, directory.url)
+        XCTAssertGreaterThan(viewModel.directoryTreeGeneration, 0)
+    }
+
     func testDownloadCreatesCompletedTransferRecordThatCanBeCleared() async throws {
         let client = DownloadSVNClient()
         let viewModel = BrowserViewModel(svnClient: client)
@@ -565,5 +600,56 @@ private actor HistorySVNClient: SVNClient {
         replacedExpectedRevision = expectedRevision
         replacedContents = try String(contentsOf: localFileURL, encoding: .utf8)
         return SVNWriteResult(revision: 13)
+    }
+}
+
+private actor TreeOperationsSVNClient: SVNClient {
+    struct Move: Sendable {
+        let sourceURL: URL
+        let destinationURL: URL
+    }
+
+    private var listCounts: [String: Int] = [:]
+    private(set) var lastMove: Move?
+    private(set) var lastUploadDirectory: URL?
+
+    func version() async throws -> String { "1.14.5" }
+
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        listCounts[url.absoluteString, default: 0] += 1
+        if url.path.hasSuffix("资料") || url.path.hasSuffix("资料/") {
+            return [SVNListEntry(
+                name: "旧版.txt", kind: .file, size: 4, revision: 2,
+                author: "tester", updatedAt: nil
+            )]
+        }
+        return [SVNListEntry(
+            name: "资料", kind: .directory, size: nil, revision: 1,
+            author: "tester", updatedAt: nil
+        )]
+    }
+
+    func listCount(for url: URL) -> Int {
+        listCounts[url.absoluteString, default: 0]
+    }
+
+    func move(
+        from sourceURL: URL,
+        to destinationURL: URL,
+        message: String,
+        options: SVNRequestOptions
+    ) async throws -> SVNWriteResult {
+        lastMove = Move(sourceURL: sourceURL, destinationURL: destinationURL)
+        return SVNWriteResult(revision: 3)
+    }
+
+    func upload(
+        files: [URL],
+        to directoryURL: URL,
+        message: String,
+        options: SVNRequestOptions
+    ) async throws -> SVNWriteResult {
+        lastUploadDirectory = directoryURL
+        return SVNWriteResult(revision: 4)
     }
 }

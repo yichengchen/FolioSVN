@@ -14,11 +14,19 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private let transferButton = NSButton(title: "传输", target: nil, action: nil)
     private let emptyStateLabel = NSTextField(wrappingLabelWithString: "")
     private let scrollView = NSScrollView()
-    private let tableView = NSTableView()
+    private let outlineView = NSOutlineView()
     private var favoriteMenuItem: NSMenuItem?
     private var operationTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var historyWindowController: NSWindowController?
+    private var rootNodes: [BrowserTreeNode] = []
+    private var expandedURLKeys: Set<String> = []
+    private var childLoadTasks: [String: Task<Void, Never>] = [:]
+    private var renderedRows: [BrowserRow] = []
+    private var renderedProfileID: UUID?
+    private var renderedCurrentURL: URL?
+    private var renderedSearchMode = false
+    private var renderedTreeGeneration = 0
 
     init(viewModel: BrowserViewModel) {
         self.viewModel = viewModel
@@ -102,19 +110,24 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             column.width = width
             column.minWidth = identifier == "name" ? 140 : 55
             column.sortDescriptorPrototype = NSSortDescriptor(key: identifier, ascending: true)
-            tableView.addTableColumn(column)
+            outlineView.addTableColumn(column)
         }
-        tableView.delegate = self
-        tableView.dataSource = self
-        tableView.usesAlternatingRowBackgroundColors = true
-        tableView.rowSizeStyle = .medium
-        tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        tableView.allowsMultipleSelection = false
-        tableView.registerForDraggedTypes([.fileURL])
-        tableView.setDraggingSourceOperationMask(.copy, forLocal: false)
-        tableView.doubleAction = #selector(openSelectedItem)
-        tableView.target = self
-        scrollView.documentView = tableView
+        outlineView.outlineTableColumn = outlineView.tableColumn(
+            withIdentifier: NSUserInterfaceItemIdentifier("name")
+        )
+        outlineView.delegate = self
+        outlineView.dataSource = self
+        outlineView.usesAlternatingRowBackgroundColors = true
+        outlineView.rowSizeStyle = .medium
+        outlineView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        outlineView.allowsMultipleSelection = false
+        outlineView.indentationPerLevel = 16
+        outlineView.autoresizesOutlineColumn = false
+        outlineView.registerForDraggedTypes([.fileURL])
+        outlineView.setDraggingSourceOperationMask(.copy, forLocal: false)
+        outlineView.doubleAction = #selector(openSelectedItem)
+        outlineView.target = self
+        scrollView.documentView = outlineView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
@@ -138,16 +151,16 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         menu.addItem(withTitle: "复制仓库 URL", action: #selector(copySelectedRepositoryURL), keyEquivalent: "")
         for item in menu.items { item.target = self }
         menu.delegate = self
-        tableView.menu = menu
+        outlineView.menu = menu
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        guard menu === tableView.menu else { return }
+        guard menu === outlineView.menu else { return }
         if let event = NSApp.currentEvent, event.window === view.window {
-            let point = tableView.convert(event.locationInWindow, from: nil)
-            let clickedRow = tableView.row(at: point)
+            let point = outlineView.convert(event.locationInWindow, from: nil)
+            let clickedRow = outlineView.row(at: point)
             if clickedRow >= 0 {
-                tableView.selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
+                outlineView.selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
             }
         }
         guard let row = selectedRow else { return }
@@ -260,8 +273,8 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             : "传输"
         viewModel.isBusy ? progressIndicator.startAnimation(nil) : progressIndicator.stopAnimation(nil)
         cancelActivityButton.isHidden = !viewModel.isCancellable
-        tableView.reloadData()
-        tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("location"))?.isHidden = !viewModel.isShowingSearchResults
+        synchronizeOutlineContent()
+        outlineView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("location"))?.isHidden = !viewModel.isShowingSearchResults
         rebuildBreadcrumbs()
 
         if viewModel.isShowingSearchResults {
@@ -286,6 +299,150 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             }
         }
         onNavigationStateChange?()
+    }
+
+    private func synchronizeOutlineContent() {
+        let generationChanged = renderedTreeGeneration != viewModel.directoryTreeGeneration
+        let profileChanged = renderedProfileID != viewModel.session?.profileID
+        let contentChanged = renderedRows != viewModel.rows
+            || profileChanged
+            || renderedCurrentURL != viewModel.currentURL
+            || renderedSearchMode != viewModel.isShowingSearchResults
+            || generationChanged
+        guard contentChanged else { return }
+
+        let selectedURL = selectedRow?.url
+        let reusableNodes = generationChanged || profileChanged ? [:] : treeNodeMap(rootNodes)
+        if profileChanged { expandedURLKeys.removeAll() }
+        if generationChanged || profileChanged || renderedCurrentURL != viewModel.currentURL || renderedSearchMode != viewModel.isShowingSearchResults {
+            childLoadTasks.values.forEach { $0.cancel() }
+            childLoadTasks.removeAll()
+        }
+        rootNodes = viewModel.rows.map { row in
+            if let node = reusableNodes[row.url.absoluteString] {
+                node.row = row
+                return node
+            }
+            return BrowserTreeNode(row: row)
+        }
+        renderedRows = viewModel.rows
+        renderedProfileID = viewModel.session?.profileID
+        renderedCurrentURL = viewModel.currentURL
+        renderedSearchMode = viewModel.isShowingSearchResults
+        renderedTreeGeneration = viewModel.directoryTreeGeneration
+        outlineView.reloadData()
+        guard !viewModel.isShowingSearchResults else {
+            restoreSelection(url: selectedURL)
+            return
+        }
+        restoreExpandedState(in: rootNodes)
+        restoreSelection(url: selectedURL)
+    }
+
+    private func treeNodeMap(_ nodes: [BrowserTreeNode]) -> [String: BrowserTreeNode] {
+        var result: [String: BrowserTreeNode] = [:]
+        func collect(_ values: [BrowserTreeNode]) {
+            for node in values {
+                result[node.row.url.absoluteString] = node
+                if let children = node.children { collect(children) }
+            }
+        }
+        collect(nodes)
+        return result
+    }
+
+    private func restoreExpandedState(in nodes: [BrowserTreeNode]) {
+        for node in nodes where node.row.kind == .directory {
+            guard expandedURLKeys.contains(node.row.url.absoluteString) else { continue }
+            outlineView.expandItem(node)
+            if let children = node.children {
+                restoreExpandedState(in: children)
+            }
+        }
+    }
+
+    private func restoreSelection(url: URL?) {
+        guard let url, let node = treeNodeMap(rootNodes)[url.absoluteString] else { return }
+        let row = outlineView.row(forItem: node)
+        guard row >= 0 else { return }
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    }
+
+    private func loadChildren(for node: BrowserTreeNode, forceReload: Bool = false) {
+        guard node.row.kind == .directory, !viewModel.isShowingSearchResults else { return }
+        if node.children != nil, !forceReload { return }
+        let key = node.row.url.absoluteString
+        guard childLoadTasks[key] == nil else { return }
+        node.isLoading = true
+        node.errorMessage = nil
+        outlineView.reloadItem(node, reloadChildren: true)
+        let generation = viewModel.directoryTreeGeneration
+        childLoadTasks[key] = Task { @MainActor [weak self, weak node] in
+            guard let self, let node else { return }
+            defer { self.childLoadTasks.removeValue(forKey: key) }
+            do {
+                let rows = try await self.viewModel.rows(in: node.row.url, forceReload: forceReload)
+                try Task.checkCancellation()
+                guard generation == self.viewModel.directoryTreeGeneration,
+                      self.treeContains(node) else { return }
+                node.children = self.sortedTreeRows(rows).map(BrowserTreeNode.init)
+                node.isLoading = false
+                node.errorMessage = nil
+                self.outlineView.reloadItem(node, reloadChildren: true)
+                self.restoreExpandedState(in: node.children ?? [])
+            } catch is CancellationError {
+                node.isLoading = false
+            } catch {
+                guard self.treeContains(node) else { return }
+                node.isLoading = false
+                node.errorMessage = error.localizedDescription
+                self.outlineView.reloadItem(node, reloadChildren: true)
+            }
+        }
+    }
+
+    private func treeContains(_ target: BrowserTreeNode) -> Bool {
+        func contains(_ nodes: [BrowserTreeNode]) -> Bool {
+            for node in nodes {
+                if node === target { return true }
+                if let children = node.children, contains(children) { return true }
+            }
+            return false
+        }
+        return contains(rootNodes)
+    }
+
+    private func sortedTreeRows(_ rows: [BrowserRow]) -> [BrowserRow] {
+        guard let descriptor = outlineView.sortDescriptors.first,
+              let column = descriptor.key else {
+            return rows.sorted { lhs, rhs in
+                if lhs.kind != rhs.kind { return lhs.kind == .directory }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+        }
+        return rows.sorted { lhs, rhs in
+            if lhs.kind != rhs.kind { return lhs.kind == .directory }
+            let comparison: ComparisonResult
+            switch column {
+            case "size": comparison = NSNumber(value: lhs.byteSize ?? -1).compare(NSNumber(value: rhs.byteSize ?? -1))
+            case "modified": comparison = (lhs.updatedAt ?? .distantPast).compare(rhs.updatedAt ?? .distantPast)
+            case "author": comparison = lhs.author.localizedStandardCompare(rhs.author)
+            case "revision": comparison = NSNumber(value: lhs.revision ?? -1).compare(NSNumber(value: rhs.revision ?? -1))
+            case "location": comparison = lhs.location.localizedStandardCompare(rhs.location)
+            default: comparison = lhs.name.localizedStandardCompare(rhs.name)
+            }
+            return descriptor.ascending ? comparison == .orderedAscending : comparison == .orderedDescending
+        }
+    }
+
+    private func sortLoadedChildren(_ nodes: [BrowserTreeNode]) {
+        for node in nodes {
+            if let children = node.children {
+                node.children = sortedTreeRows(children.map(\.row))
+                    .compactMap { row in children.first(where: { $0.row.url == row.url }) }
+                sortLoadedChildren(node.children ?? [])
+            }
+        }
     }
 
     private func rebuildBreadcrumbs() {
@@ -323,9 +480,13 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         run { try await self.viewModel.navigate(to: sender.url) }
     }
 
+    private var selectedNode: BrowserTreeNode? {
+        guard outlineView.selectedRow >= 0 else { return nil }
+        return outlineView.item(atRow: outlineView.selectedRow) as? BrowserTreeNode
+    }
+
     private var selectedRow: BrowserRow? {
-        guard tableView.selectedRow >= 0, viewModel.rows.indices.contains(tableView.selectedRow) else { return nil }
-        return viewModel.rows[tableView.selectedRow]
+        selectedNode?.row
     }
 
     @objc private func openSelectedItem() {
@@ -366,7 +527,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         handleFilesForUpload(panel.urls)
     }
 
-    private func handleFilesForUpload(_ urls: [URL]) {
+    private func handleFilesForUpload(_ urls: [URL], targetDirectory: BrowserTreeNode? = nil) {
         guard canModifyRepository, !urls.isEmpty else { return }
         let files = Array(Dictionary(grouping: urls.map(\.standardizedFileURL), by: \.path).compactMap(\.value.first))
         let invalidURL = files.first { url in
@@ -378,7 +539,13 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             return
         }
 
-        let existing = Dictionary(uniqueKeysWithValues: viewModel.rows.map { ($0.name, $0) })
+        let targetRows: [BrowserRow]
+        if let targetDirectory {
+            targetRows = targetDirectory.children?.map(\.row) ?? []
+        } else {
+            targetRows = viewModel.rows
+        }
+        let existing = Dictionary(uniqueKeysWithValues: targetRows.map { ($0.name, $0) })
         let conflicts = files.compactMap { localURL in
             existing[localURL.lastPathComponent].map { row in (localURL, row) }
         }
@@ -395,7 +562,8 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             let values = try? url.resourceValues(forKeys: [.fileSizeKey])
             return partial + Int64(values?.fileSize ?? 0)
         }
-        let details = "将上传 \(files.count) 个文件（\(ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file))），一次提交到当前文件夹。"
+        let destinationName = targetDirectory?.row.name ?? "当前文件夹"
+        let details = "将上传 \(files.count) 个文件（\(ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file))）到“\(destinationName)”，并作为一次提交。"
         guard let message = prompt(
             title: "确认上传",
             message: details,
@@ -403,7 +571,13 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             initialValue: "上传 \(files.count) 个文件",
             confirmTitle: "上传"
         ) else { return }
-        run { _ = try await self.viewModel.upload(files: files, message: message) }
+        run {
+            _ = try await self.viewModel.upload(
+                files: files,
+                to: targetDirectory?.row.url,
+                message: message
+            )
+        }
     }
 
     @objc private func replaceSelectedItem() {
@@ -449,7 +623,8 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             initialValue: "新建文件夹",
             confirmTitle: "创建"
         ), validateName(name) else { return }
-        guard !viewModel.rows.contains(where: { $0.name == name }) else {
+        guard let node = selectedNode,
+              !siblingRows(for: node).contains(where: { $0.name == name }) else {
             presentError(message: "当前文件夹已存在同名项目。")
             return
         }
@@ -470,6 +645,19 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             return
         }
         run { _ = try await self.viewModel.rename(row, to: name, message: "重命名：\(row.name) → \(name)") }
+    }
+
+    private func siblingRows(for target: BrowserTreeNode) -> [BrowserRow] {
+        if rootNodes.contains(where: { $0 === target }) { return rootNodes.map(\.row) }
+        func find(in nodes: [BrowserTreeNode]) -> [BrowserRow]? {
+            for node in nodes {
+                guard let children = node.children else { continue }
+                if children.contains(where: { $0 === target }) { return children.map(\.row) }
+                if let result = find(in: children) { return result }
+            }
+            return nil
+        }
+        return find(in: rootNodes) ?? []
     }
 
     @objc private func deleteSelectedItem() {
@@ -813,12 +1001,34 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     }
 }
 
-extension BrowserViewController: NSTableViewDataSource {
-    func numberOfRows(in tableView: NSTableView) -> Int { viewModel.rows.count }
+extension BrowserViewController: NSOutlineViewDataSource {
+    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        guard let item else { return rootNodes.count }
+        guard let node = item as? BrowserTreeNode,
+              node.row.kind == .directory,
+              !viewModel.isShowingSearchResults else { return 0 }
+        return node.children?.count ?? 1
+    }
 
-    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
-        guard !viewModel.isBusy, viewModel.rows.indices.contains(row) else { return nil }
-        let browserRow = viewModel.rows[row]
+    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        guard let item else { return rootNodes[index] }
+        guard let node = item as? BrowserTreeNode else {
+            return BrowserTreePlaceholder(message: "无法读取")
+        }
+        if let children = node.children { return children[index] }
+        let message = node.errorMessage.map { "加载失败：\($0)（收起后重试）" }
+            ?? (node.isLoading ? "正在加载…" : "展开以加载内容")
+        return BrowserTreePlaceholder(message: message)
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        guard !viewModel.isShowingSearchResults, let node = item as? BrowserTreeNode else { return false }
+        return node.row.kind == .directory
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> (any NSPasteboardWriting)? {
+        guard !viewModel.isBusy, let node = item as? BrowserTreeNode else { return nil }
+        let browserRow = node.row
         guard let downloadRequest = viewModel.downloadRequest(for: browserRow) else { return nil }
         let fileType = browserRow.kind == .directory
             ? UTType.folder.identifier
@@ -828,27 +1038,40 @@ extension BrowserViewController: NSTableViewDataSource {
         return provider
     }
 
-    func tableView(
-        _ tableView: NSTableView,
+    func outlineView(
+        _ outlineView: NSOutlineView,
         validateDrop info: any NSDraggingInfo,
-        proposedRow row: Int,
-        proposedDropOperation dropOperation: NSTableView.DropOperation
+        proposedItem item: Any?,
+        proposedChildIndex index: Int
     ) -> NSDragOperation {
         guard canModifyRepository, !localFileURLs(from: info.draggingPasteboard).isEmpty else { return [] }
-        tableView.setDropRow(viewModel.rows.count, dropOperation: .above)
+        if let node = item as? BrowserTreeNode, node.row.kind == .directory {
+            outlineView.setDropItem(node, dropChildIndex: NSOutlineViewDropOnItemIndex)
+        } else {
+            outlineView.setDropItem(nil, dropChildIndex: rootNodes.count)
+        }
         return .copy
     }
 
-    func tableView(
-        _ tableView: NSTableView,
+    func outlineView(
+        _ outlineView: NSOutlineView,
         acceptDrop info: any NSDraggingInfo,
-        row: Int,
-        dropOperation: NSTableView.DropOperation
+        item: Any?,
+        childIndex index: Int
     ) -> Bool {
         let urls = localFileURLs(from: info.draggingPasteboard)
         guard !urls.isEmpty else { return false }
-        handleFilesForUpload(urls)
+        let target = (item as? BrowserTreeNode).flatMap { $0.row.kind == .directory ? $0 : nil }
+        handleFilesForUpload(urls, targetDirectory: target)
         return true
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        guard let descriptor = outlineView.sortDescriptors.first, let column = descriptor.key else { return }
+        viewModel.sort(column: column, ascending: descriptor.ascending)
+        sortLoadedChildren(rootNodes)
+        outlineView.reloadData()
+        restoreExpandedState(in: rootNodes)
     }
 
     private func localFileURLs(from pasteboard: NSPasteboard) -> [URL] {
@@ -858,20 +1081,32 @@ extension BrowserViewController: NSTableViewDataSource {
     }
 }
 
-extension BrowserViewController: NSTableViewDelegate {
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+extension BrowserViewController: NSOutlineViewDelegate {
+    func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let tableColumn else { return nil }
-        let browserRow = viewModel.rows[row]
+        if let placeholder = item as? BrowserTreePlaceholder {
+            guard tableColumn.identifier.rawValue == "name" else { return nil }
+            let label = NSTextField(labelWithString: placeholder.message)
+            label.textColor = .secondaryLabelColor
+            label.lineBreakMode = .byTruncatingTail
+            let cell = NSTableCellView()
+            cell.textField = label
+            cell.addSubview(label)
+            label.snp.makeConstraints { $0.leading.trailing.equalToSuperview().inset(6); $0.centerY.equalToSuperview() }
+            return cell
+        }
+        guard let node = item as? BrowserTreeNode else { return nil }
+        let browserRow = node.row
         if tableColumn.identifier.rawValue == "name" {
             let identifier = NSUserInterfaceItemIdentifier("BrowserNameCell")
-            let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? BrowserNameCell
+            let cell = outlineView.makeView(withIdentifier: identifier, owner: self) as? BrowserNameCell
                 ?? BrowserNameCell(identifier: identifier)
             cell.configure(row: browserRow)
             return cell
         }
 
         let identifier = NSUserInterfaceItemIdentifier("BrowserCell-\(tableColumn.identifier.rawValue)")
-        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
+        let cell = outlineView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
             ?? NSTableCellView()
         cell.identifier = identifier
         cell.textField = cell.textField ?? NSTextField(labelWithString: "")
@@ -884,9 +1119,21 @@ extension BrowserViewController: NSTableViewDelegate {
         return cell
     }
 
-    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
-        guard let descriptor = tableView.sortDescriptors.first, let column = descriptor.key else { return }
-        viewModel.sort(column: column, ascending: descriptor.ascending)
+    func outlineView(_ outlineView: NSOutlineView, shouldExpandItem item: Any) -> Bool {
+        guard let node = item as? BrowserTreeNode else { return false }
+        expandedURLKeys.insert(node.row.url.absoluteString)
+        if node.errorMessage != nil {
+            node.children = nil
+            node.errorMessage = nil
+        }
+        loadChildren(for: node)
+        return true
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool {
+        guard let node = item as? BrowserTreeNode else { return false }
+        expandedURLKeys.remove(node.row.url.absoluteString)
+        return true
     }
 
     func tableView(
@@ -926,6 +1173,25 @@ extension BrowserViewController: NSFilePromiseProviderDelegate {
                 completion: completion
             ) ?? completion.call(CancellationError())
         }
+    }
+}
+
+private final class BrowserTreeNode: NSObject {
+    var row: BrowserRow
+    var children: [BrowserTreeNode]?
+    var isLoading = false
+    var errorMessage: String?
+
+    init(row: BrowserRow) {
+        self.row = row
+    }
+}
+
+private final class BrowserTreePlaceholder: NSObject {
+    let message: String
+
+    init(message: String) {
+        self.message = message
     }
 }
 
@@ -1041,11 +1307,65 @@ private final class BrowserNameCell: NSTableCellView {
 
     func configure(row: BrowserRow) {
         titleLabel.stringValue = row.name
-        symbolView.image = NSImage(
-            systemSymbolName: row.kind == .directory ? "folder.fill" : "doc.fill",
+        let icon = BrowserFileIcon(row: row)
+        symbolView.image = icon.image
+        symbolView.contentTintColor = icon.tintColor
+        symbolView.imageScaling = .scaleProportionallyDown
+        symbolView.toolTip = row.kind == .directory ? "文件夹" : "文件"
+    }
+}
+
+private struct BrowserFileIcon {
+    let image: NSImage
+    let tintColor: NSColor?
+
+    init(row: BrowserRow) {
+        if row.url.isFileURL,
+           FileManager.default.fileExists(atPath: row.url.path) {
+            image = NSWorkspace.shared.icon(forFile: row.url.path)
+            tintColor = nil
+            return
+        }
+
+        let style = Self.style(for: row)
+        image = NSImage(
+            systemSymbolName: style.symbolName,
             accessibilityDescription: row.kind == .directory ? "文件夹" : "文件"
-        )
-        symbolView.contentTintColor = row.kind == .directory ? .systemBlue : .secondaryLabelColor
+        ) ?? NSImage()
+        tintColor = style.tintColor
+    }
+
+    private static func style(for row: BrowserRow) -> (symbolName: String, tintColor: NSColor) {
+        if row.kind == .directory {
+            return ("folder.fill", .systemBlue)
+        }
+
+        switch row.url.pathExtension.lowercased() {
+        case "pdf":
+            return ("doc.richtext.fill", .systemRed)
+        case "doc", "docx", "pages", "rtf":
+            return ("doc.text.fill", .systemBlue)
+        case "xls", "xlsx", "numbers", "csv", "tsv":
+            return ("tablecells.fill", .systemGreen)
+        case "ppt", "pptx", "key":
+            return ("rectangle.on.rectangle.angled", .systemOrange)
+        case "jpg", "jpeg", "png", "gif", "heic", "webp", "tiff", "svg":
+            return ("photo.fill", .systemPurple)
+        case "mov", "mp4", "m4v", "avi", "mkv", "webm":
+            return ("film.fill", .systemPink)
+        case "mp3", "m4a", "wav", "flac", "aac", "ogg":
+            return ("waveform", .systemOrange)
+        case "zip", "rar", "7z", "tar", "gz", "bz2", "xz":
+            return ("archivebox.fill", .systemBrown)
+        case "swift", "m", "mm", "h", "c", "cc", "cpp", "cxx", "java", "kt", "kts", "js", "ts", "py", "rb", "go", "rs", "sh", "zsh":
+            return ("curlybraces", .systemOrange)
+        case "json", "xml", "yaml", "yml", "plist":
+            return ("curlybraces.square.fill", .systemTeal)
+        case "txt", "md", "markdown", "log":
+            return ("doc.plaintext.fill", .secondaryLabelColor)
+        default:
+            return ("doc.fill", .secondaryLabelColor)
+        }
     }
 }
 

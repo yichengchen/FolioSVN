@@ -99,6 +99,7 @@ final class BrowserViewModel {
     private(set) var searchScope: SearchScope = .configuredRoot
     private(set) var searchIndexedAt: Date?
     private(set) var directoryCachedAt: Date?
+    private(set) var directoryTreeGeneration = 0
     private(set) var transfers: [BrowserTransfer] = []
     private(set) var session: RepositorySession?
     private(set) var currentURL: URL?
@@ -213,6 +214,27 @@ final class BrowserViewModel {
 
     var canGoBack: Bool { !backStack.isEmpty && !isBusy }
     var canGoForward: Bool { !forwardStack.isEmpty && !isBusy }
+
+    func rows(in directoryURL: URL, forceReload: Bool = false) async throws -> [BrowserRow] {
+        guard let session else { throw SVNClientError.unsupportedOperation }
+        if !forceReload,
+           let snapshot = try? await metadataService?.directoryCache(
+               profileID: session.profileID,
+               url: directoryURL
+           ) {
+            return snapshot.entries.map { BrowserRow(entry: $0, parentURL: directoryURL) }
+        }
+        let generation = directoryTreeGeneration
+        let entries = try await svnClient.list(url: directoryURL, options: session.options)
+        if generation == directoryTreeGeneration, session.profileID == self.session?.profileID {
+            try? await metadataService?.replaceDirectoryCache(
+                profileID: session.profileID,
+                url: directoryURL,
+                entries: entries
+            )
+        }
+        return entries.map { BrowserRow(entry: $0, parentURL: directoryURL) }
+    }
 
     var breadcrumbs: [Breadcrumb] {
         guard let session, let currentURL else { return [] }
@@ -567,9 +589,10 @@ final class BrowserViewModel {
     }
 
     func rename(_ row: BrowserRow, to name: String, message: String) async throws -> SVNWriteResult {
-        guard let session, let currentURL else { throw SVNClientError.unsupportedOperation }
+        guard let session, currentURL != nil else { throw SVNClientError.unsupportedOperation }
         let sourceURL = itemURL(for: row)
-        let destinationURL = currentURL.appendingPathComponent(name, isDirectory: row.kind == .directory)
+        let destinationURL = sourceURL.deletingLastPathComponent()
+            .appendingPathComponent(name, isDirectory: row.kind == .directory)
         let result = try await performActivity("正在重命名“\(row.name)”…") {
             try await self.svnClient.move(
                 from: sourceURL,
@@ -605,9 +628,10 @@ final class BrowserViewModel {
         return result
     }
 
-    func upload(files: [URL], message: String) async throws -> SVNWriteResult {
+    func upload(files: [URL], to directoryURL: URL? = nil, message: String) async throws -> SVNWriteResult {
         guard let session, let currentURL else { throw SVNClientError.unsupportedOperation }
-        let existingNames = Set(rows.map(\.name))
+        let targetDirectoryURL = directoryURL ?? currentURL
+        let existingNames: Set<String> = targetDirectoryURL == currentURL ? Set(rows.map(\.name)) : []
         if let conflict = files.first(where: { existingNames.contains($0.lastPathComponent) }) {
             throw SVNClientError.commandFailed(SVNCommandFailure(
                 operation: "upload",
@@ -628,7 +652,7 @@ final class BrowserViewModel {
         ) {
             try await self.svnClient.upload(
                 files: files,
-                to: currentURL,
+                to: targetDirectoryURL,
                 message: message,
                 options: session.options
             )
@@ -747,6 +771,7 @@ final class BrowserViewModel {
 
     private func invalidateDirectoryCache(profileID: UUID) async {
         try? await metadataService?.clearDirectoryCache(profileID: profileID)
+        directoryTreeGeneration += 1
     }
 
     private func performActivity<Result: Sendable>(
