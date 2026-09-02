@@ -12,7 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             coordinator.start()
         } catch {
             let alert = NSAlert()
-            alert.messageText = "SVN Client 无法启动"
+            alert.messageText = "\(AppBrand.displayName) 无法启动"
             alert.informativeText = "无法初始化服务器配置：\(error.localizedDescription)"
             alert.alertStyle = .critical
             alert.runModal()
@@ -28,19 +28,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let mainMenu = NSMenu()
 
         let applicationItem = NSMenuItem()
-        let applicationMenu = NSMenu(title: "SVN Client")
+        let applicationMenu = NSMenu(title: AppBrand.displayName)
         applicationMenu.addItem(
-            withTitle: "关于 SVN Client",
+            withTitle: "关于 \(AppBrand.displayName)",
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: ""
         )
         applicationMenu.addItem(.separator())
-        applicationMenu.addItem(withTitle: "隐藏 SVN Client", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        applicationMenu.addItem(withTitle: "隐藏 \(AppBrand.displayName)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         applicationMenu.addItem(withTitle: "隐藏其他", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
             .keyEquivalentModifierMask = [.command, .option]
         applicationMenu.addItem(withTitle: "显示全部", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         applicationMenu.addItem(.separator())
-        applicationMenu.addItem(withTitle: "退出 SVN Client", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        applicationMenu.addItem(withTitle: "退出 \(AppBrand.displayName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         applicationItem.submenu = applicationMenu
         mainMenu.addItem(applicationItem)
 

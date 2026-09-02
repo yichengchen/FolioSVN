@@ -25,12 +25,14 @@
 		51E0761651AA310A69863208 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DD969BBC5302793D6B69A251 /* Assets.xcassets */; };
 		552C62BA4193CDDD10E1B524 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E673DCD3EBB9A96148FA49D3 /* CredentialStore.swift */; };
 		70E12DA22E4F77223599B9DC /* SidebarStateStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C33581813F8F914748DF0BCC /* SidebarStateStoreTests.swift */; };
+		7A95EC74DCB2DE2CD4F5C79F /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 0202DFD7D823A4DD103A9C81 /* InfoPlist.strings */; };
 		81495686A1BCE5C5487904C6 /* RepositoryMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = 262679C85CDBF24C3E3B0F85 /* RepositoryMetadata.swift */; };
 		85D90CC39D939D01188BFF0F /* svn-list.xml in Resources */ = {isa = PBXBuildFile; fileRef = 4AE805CAA329E88EC808BC83 /* svn-list.xml */; };
 		86065D8C02C58EB10FE07973 /* SVNInfoDTO.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2D6C8A4FB68474C80C611C4 /* SVNInfoDTO.swift */; };
 		8D4F8E0114B024E673CF2F46 /* XMLCoder in Frameworks */ = {isa = PBXBuildFile; productRef = 8451ACE33D18A207AEFBBF18 /* XMLCoder */; };
 		8DD11E655F99ECAF2E211763 /* RepositoryProfileStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7525955FB7BEA33A10954D6F /* RepositoryProfileStoreTests.swift */; };
 		8F4F0D662AC2217F2F59F703 /* RepositoryBrowsing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 893D85B3948D172AB3BF7797 /* RepositoryBrowsing.swift */; };
+		A0B3113FC03C4BF8662226CF /* AppBrand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8405D6D3FB53C84250BAB310 /* AppBrand.swift */; };
 		A308C24E61ECFF81D3A4BD44 /* SidebarItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF13EA1D2396CEAF8CC13929 /* SidebarItem.swift */; };
 		A6378F914B9AC7E0C1D6B619 /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8853766D0C9449E4D540ABB1 /* MainWindowController.swift */; };
 		A7F99B6FBA64BAE52ACF848D /* RepositoryConnectionViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40D1F57794C36E2173275B8 /* RepositoryConnectionViewController.swift */; };
@@ -63,6 +65,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		0F5E63399FC77A40C910DC6D /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		1621A34FC3C409F121F5E1CB /* RepositoryMetadataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryMetadataStore.swift; sourceTree = "<group>"; };
 		1BF35251B9E18628C9A9DAD9 /* SVNClientTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SVNClientTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		262679C85CDBF24C3E3B0F85 /* RepositoryMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryMetadata.swift; sourceTree = "<group>"; };
@@ -82,6 +85,7 @@
 		70280189C97E8E0581F9FCA9 /* SVNCommandRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNCommandRunner.swift; sourceTree = "<group>"; };
 		7525955FB7BEA33A10954D6F /* RepositoryProfileStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryProfileStoreTests.swift; sourceTree = "<group>"; };
 		7AD6C5CD5BA4693964D39E5E /* BrowserViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserViewController.swift; sourceTree = "<group>"; };
+		8405D6D3FB53C84250BAB310 /* AppBrand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppBrand.swift; sourceTree = "<group>"; };
 		846C0ED0FF634009F9BBE2F9 /* SVNCLIGatewayWriteIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNCLIGatewayWriteIntegrationTests.swift; sourceTree = "<group>"; };
 		878042ECD9C050AB2CECEA25 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		8853766D0C9449E4D540ABB1 /* MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowController.swift; sourceTree = "<group>"; };
@@ -155,6 +159,7 @@
 			isa = PBXGroup;
 			children = (
 				DD969BBC5302793D6B69A251 /* Assets.xcassets */,
+				0202DFD7D823A4DD103A9C81 /* InfoPlist.strings */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -254,6 +259,7 @@
 		ADB4BAA5A01132FDD899B5AC /* App */ = {
 			isa = PBXGroup;
 			children = (
+				8405D6D3FB53C84250BAB310 /* AppBrand.swift */,
 				AD94A70E7F15469F9AF3BCC2 /* AppDelegate.swift */,
 				878042ECD9C050AB2CECEA25 /* main.swift */,
 				ACB21D996BC136604EFD691A /* MainCoordinator.swift */,
@@ -391,6 +397,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				51E0761651AA310A69863208 /* Assets.xcassets in Resources */,
+				7A95EC74DCB2DE2CD4F5C79F /* InfoPlist.strings in Resources */,
 				F4D71CB6F1F6153E7B443A8F /* SVNRuntime in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -466,6 +473,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A0B3113FC03C4BF8662226CF /* AppBrand.swift in Sources */,
 				407DA102715F6D50AD28810C /* AppDelegate.swift in Sources */,
 				C587608B2225CDA0E44D05C9 /* BrowserViewController.swift in Sources */,
 				EA0BEEB9DBB1BA3390F4C62A /* BrowserViewModel.swift in Sources */,
@@ -507,6 +515,17 @@
 		};
 /* End PBXTargetDependency section */
 
+/* Begin PBXVariantGroup section */
+		0202DFD7D823A4DD103A9C81 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				0F5E63399FC77A40C910DC6D /* en */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
 /* Begin XCBuildConfiguration section */
 		04900E50F06D7B1485CDE71E /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -518,14 +537,15 @@
 				DEVELOPMENT_TEAM = MEWHFZ92DY;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "SVN Client";
+				INFOPLIST_KEY_CFBundleDisplayName = "Folio SVN";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.business";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.west2online.svnclient;
-				PRODUCT_NAME = SVNClient;
+				PRODUCT_MODULE_NAME = SVNClient;
+				PRODUCT_NAME = "Folio SVN";
 				SDKROOT = macosx;
 			};
 			name = Release;
@@ -543,7 +563,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.svnclient.tests;
 				SDKROOT = macosx;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SVNClient.app/Contents/MacOS/SVNClient";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Folio SVN.app/Contents/MacOS/Folio SVN";
 			};
 			name = Debug;
 		};
@@ -560,7 +580,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.svnclient.tests;
 				SDKROOT = macosx;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SVNClient.app/Contents/MacOS/SVNClient";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Folio SVN.app/Contents/MacOS/Folio SVN";
 			};
 			name = Release;
 		};
@@ -639,14 +659,15 @@
 				DEVELOPMENT_TEAM = MEWHFZ92DY;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "SVN Client";
+				INFOPLIST_KEY_CFBundleDisplayName = "Folio SVN";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.business";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.west2online.svnclient;
-				PRODUCT_NAME = SVNClient;
+				PRODUCT_MODULE_NAME = SVNClient;
+				PRODUCT_NAME = "Folio SVN";
 				SDKROOT = macosx;
 			};
 			name = Debug;

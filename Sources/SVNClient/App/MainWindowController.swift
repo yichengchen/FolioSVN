@@ -35,7 +35,7 @@ final class MainWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "SVN Client"
+        window.title = AppBrand.displayName
         window.minSize = NSSize(width: 800, height: 520)
         window.center()
         window.contentViewController = splitViewController

@@ -1,4 +1,4 @@
-# SVN Client
+# Folio SVN
 
 面向企业文档管理场景的 macOS 26+ SVN 客户端。界面使用 AppKit，布局使用 SnapKit，工程采用 XcodeGen 保持可复现。
 
