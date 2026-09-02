@@ -112,6 +112,46 @@ final class SVNCLIGatewayTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(runner.calls.single).contains("--verbose"))
     }
 
+    func testLogMapsHistoryAndUsesPegRevision() async throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <log>
+          <logentry revision="42">
+            <author>zhangsan</author>
+            <date>2026-09-02T10:20:30.000000Z</date>
+            <msg>更新接口说明</msg>
+          </logentry>
+          <logentry revision="18">
+            <msg>首次上传</msg>
+          </logentry>
+        </log>
+        """
+        let runner = MockSVNCommandRunner(output: .success(stdout: xml))
+        let gateway = makeMockGateway(runner)
+        let url = try XCTUnwrap(URL(string: "https://svn.example.com/repo/接口说明.pdf"))
+
+        let entries = try await gateway.log(
+            url: url,
+            pegRevision: 50,
+            limit: 100,
+            options: .anonymous
+        )
+
+        XCTAssertEqual(entries.map(\.revision), [42, 18])
+        XCTAssertEqual(entries.first?.author, "zhangsan")
+        XCTAssertEqual(entries.first?.message, "更新接口说明")
+        XCTAssertNotNil(entries.first?.date)
+        XCTAssertEqual(entries.last?.author, nil)
+        XCTAssertEqual(
+            runner.calls.single,
+            [
+                "svn", "log",
+                "https://svn.example.com/repo/%E6%8E%A5%E5%8F%A3%E8%AF%B4%E6%98%8E.pdf@50",
+                "--xml", "--limit", "100", "--non-interactive"
+            ]
+        )
+    }
+
     func testCredentialsUseStandardInputAndCertificateTrustIsScopedToRequest() async throws {
         let fixtureURL = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "svn-list", withExtension: "xml"))
         let runner = MockSVNCommandRunner(output: .success(stdout: try Data(contentsOf: fixtureURL)))

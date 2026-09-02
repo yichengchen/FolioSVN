@@ -16,6 +16,16 @@ struct BrowserDownloadRequest: Sendable {
     let options: SVNRequestOptions
 }
 
+struct BrowserFileHistory: Sendable {
+    let profileID: UUID
+    let sourceURL: URL
+    let displayName: String
+    let currentRevision: Int
+    let pegRevision: Int
+    let entries: [SVNLogEntry]
+    let options: SVNRequestOptions
+}
+
 struct BrowserTransfer: Identifiable, Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case download
@@ -294,7 +304,7 @@ final class BrowserViewModel {
             effectiveRevision = row.revision
         }
         let cacheURL = try Self.openCacheURL(
-            session: session,
+            profileID: session.profileID,
             revision: effectiveRevision,
             itemURL: itemURL(for: row)
         )
@@ -316,6 +326,117 @@ final class BrowserViewModel {
             )
         }
         return cacheURL
+    }
+
+    func history(for row: BrowserRow, limit: Int = 100) async throws -> BrowserFileHistory {
+        guard let session, row.kind == .file else { throw SVNClientError.unsupportedOperation }
+        return try await performActivity("正在读取“\(row.name)”的历史…", cancellable: true) {
+            let info = try await self.svnClient.info(url: row.url, options: session.options)
+            guard info.kind == .file else { throw SVNClientError.unsupportedOperation }
+            let entries = try await self.svnClient.log(
+                url: row.url,
+                pegRevision: info.revision,
+                limit: limit,
+                options: session.options
+            )
+            return BrowserFileHistory(
+                profileID: session.profileID,
+                sourceURL: row.url,
+                displayName: row.name,
+                currentRevision: info.lastChangedRevision ?? info.revision,
+                pegRevision: info.revision,
+                entries: entries.sorted { $0.revision > $1.revision },
+                options: session.options
+            )
+        }
+    }
+
+    func download(
+        history: BrowserFileHistory,
+        revision: Int,
+        to destinationURL: URL,
+        overwrite: Bool
+    ) async throws {
+        guard history.entries.contains(where: { $0.revision == revision }) else {
+            throw SVNClientError.unsupportedOperation
+        }
+        try await performTransfer(
+            kind: .download,
+            title: "下载 \(history.displayName) 的 r\(revision)",
+            detail: "历史版本 · 保存为 \(destinationURL.lastPathComponent)",
+            cancellable: true
+        ) {
+            try await self.svnClient.exportHistoricalVersion(
+                url: history.sourceURL,
+                pegRevision: history.pegRevision,
+                revision: revision,
+                to: destinationURL,
+                overwrite: overwrite,
+                options: history.options
+            )
+        }
+        noticeText = "历史版本 r\(revision) 下载完成 · \(destinationURL.path)"
+        onChange?()
+    }
+
+    func localURLForOpening(history: BrowserFileHistory, revision: Int) async throws -> URL {
+        let cacheURL = try Self.openCacheURL(
+            profileID: history.profileID,
+            revision: revision,
+            itemURL: history.sourceURL
+        )
+        if !FileManager.default.fileExists(atPath: cacheURL.path) {
+            try FileManager.default.createDirectory(
+                at: cacheURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try await download(history: history, revision: revision, to: cacheURL, overwrite: true)
+        }
+        return cacheURL
+    }
+
+    func restore(
+        history: BrowserFileHistory,
+        revision: Int,
+        message: String
+    ) async throws -> SVNWriteResult {
+        guard revision != history.currentRevision else { throw SVNClientError.alreadyCurrentRevision }
+        guard history.entries.contains(where: { $0.revision == revision }) else {
+            throw SVNClientError.unsupportedOperation
+        }
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SVNClient-Restore-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let historicalFileURL = temporaryDirectory.appendingPathComponent(history.displayName)
+        let result = try await performTransfer(
+            kind: .replace,
+            title: "恢复 \(history.displayName) 至 r\(revision)",
+            detail: "基于当前 r\(history.currentRevision) 创建新版本",
+            cancellable: false
+        ) {
+            try await self.svnClient.exportHistoricalVersion(
+                url: history.sourceURL,
+                pegRevision: history.pegRevision,
+                revision: revision,
+                to: historicalFileURL,
+                overwrite: false,
+                options: history.options
+            )
+            return try await self.svnClient.replace(
+                localFileURL: historicalFileURL,
+                targetURL: history.sourceURL,
+                expectedRevision: history.currentRevision,
+                message: message,
+                options: history.options
+            )
+        }
+        await invalidateDirectoryCache(profileID: history.profileID)
+        if currentURL == history.sourceURL.deletingLastPathComponent() {
+            try await refresh()
+        }
+        showWriteSuccess("已恢复 r\(revision) 的内容", result: result)
+        return result
     }
 
     func toggleFavorite(_ row: BrowserRow) async throws -> Bool {
@@ -724,7 +845,7 @@ final class BrowserViewModel {
         searchIndexedAt = nil
     }
 
-    private static func openCacheURL(session: RepositorySession, revision: Int?, itemURL: URL) throws -> URL {
+    private static func openCacheURL(profileID: UUID, revision: Int?, itemURL: URL) throws -> URL {
         let cacheRoot = try FileManager.default.url(
             for: .cachesDirectory,
             in: .userDomainMask,
@@ -734,7 +855,7 @@ final class BrowserViewModel {
         let revision = revision.map(String.init) ?? "HEAD"
         let pathComponents = itemURL.pathComponents.filter { $0 != "/" }
         return pathComponents.reduce(
-            cacheRoot.appendingPathComponent(session.profileID.uuidString).appendingPathComponent(revision),
+            cacheRoot.appendingPathComponent(profileID.uuidString).appendingPathComponent(revision),
             { $0.appendingPathComponent($1) }
         )
     }

@@ -6,7 +6,9 @@ protocol SVNClient: Sendable {
     func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry]
     func listRecursively(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry]
     func info(url: URL, options: SVNRequestOptions) async throws -> SVNItemInfo
+    func log(url: URL, pegRevision: Int?, limit: Int, options: SVNRequestOptions) async throws -> [SVNLogEntry]
     func export(url: URL, to destinationURL: URL, revision: Int?, overwrite: Bool, options: SVNRequestOptions) async throws
+    func exportHistoricalVersion(url: URL, pegRevision: Int, revision: Int, to destinationURL: URL, overwrite: Bool, options: SVNRequestOptions) async throws
     func makeDirectory(url: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult
     func move(from sourceURL: URL, to destinationURL: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult
     func delete(url: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult
@@ -27,8 +29,29 @@ extension SVNClient {
         throw SVNClientError.unsupportedOperation
     }
 
+    func log(url: URL, pegRevision: Int?, limit: Int, options: SVNRequestOptions) async throws -> [SVNLogEntry] {
+        throw SVNClientError.unsupportedOperation
+    }
+
     func export(url: URL, to destinationURL: URL, revision: Int?, overwrite: Bool, options: SVNRequestOptions) async throws {
         throw SVNClientError.unsupportedOperation
+    }
+
+    func exportHistoricalVersion(
+        url: URL,
+        pegRevision: Int,
+        revision: Int,
+        to destinationURL: URL,
+        overwrite: Bool,
+        options: SVNRequestOptions
+    ) async throws {
+        try await export(
+            url: url,
+            to: destinationURL,
+            revision: revision,
+            overwrite: overwrite,
+            options: options
+        )
     }
 
     func makeDirectory(url: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
@@ -115,6 +138,13 @@ struct SVNItemInfo: Equatable, Sendable {
     let properties: [String: String]
 }
 
+struct SVNLogEntry: Equatable, Sendable {
+    let revision: Int
+    let author: String?
+    let date: Date?
+    let message: String
+}
+
 struct SVNWriteResult: Equatable, Sendable {
     let revision: Int?
 }
@@ -132,10 +162,12 @@ enum SVNClientError: Error, Equatable, Sendable {
     case invalidListXML
     case invalidInfoXML
     case invalidPropertiesXML
+    case invalidLogXML
     case destinationExists
     case invalidLocalFile(String)
     case duplicateLocalFileName(String)
     case remoteChanged
+    case alreadyCurrentRevision
     case connectionTimedOut
     case unsupportedOperation
 }
@@ -177,6 +209,8 @@ extension SVNClientError: LocalizedError {
             return "仓库返回了无法解析的文件信息"
         case .invalidPropertiesXML:
             return "仓库返回了无法解析的属性信息"
+        case .invalidLogXML:
+            return "仓库返回了无法解析的历史记录"
         case .destinationExists:
             return "本地目标已存在"
         case let .invalidLocalFile(name):
@@ -185,6 +219,8 @@ extension SVNClientError: LocalizedError {
             return "选择中包含同名文件：\(name)"
         case .remoteChanged:
             return "文件已被其他人更新，请刷新后重试"
+        case .alreadyCurrentRevision:
+            return "当前文件已经是所选版本"
         case .connectionTimedOut:
             return "连接或读取 SVN 服务器超过 10 秒，已停止等待；请检查服务器地址和网络"
         case .unsupportedOperation:
@@ -357,8 +393,62 @@ final class SVNCLIGateway: SVNClient, Sendable {
         )
     }
 
+    func log(
+        url: URL,
+        pegRevision: Int?,
+        limit: Int,
+        options: SVNRequestOptions
+    ) async throws -> [SVNLogEntry] {
+        let safeLimit = max(1, min(limit, 500))
+        let output = try await executeAuthenticated(
+            operation: "log",
+            arguments: [
+                "log",
+                Self.svnTarget(url.absoluteString, pegRevision: pegRevision),
+                "--xml",
+                "--limit", String(safeLimit)
+            ],
+            urls: [url],
+            options: options,
+            timeout: connectionTimeout
+        )
+        do {
+            return try XMLDecoder()
+                .decode(SVNLogDocumentDTO.self, from: output.standardOutput)
+                .logentry
+                .map {
+                    SVNLogEntry(
+                        revision: $0.revision,
+                        author: $0.author,
+                        date: $0.date.flatMap(Self.parseSVNDate),
+                        message: $0.message ?? ""
+                    )
+                }
+        } catch {
+            throw SVNClientError.invalidLogXML
+        }
+    }
+
     func export(
         url: URL,
+        to destinationURL: URL,
+        revision: Int?,
+        overwrite: Bool,
+        options: SVNRequestOptions
+    ) async throws {
+        try await export(
+            target: Self.svnTarget(url.absoluteString),
+            sourceURL: url,
+            to: destinationURL,
+            revision: revision,
+            overwrite: overwrite,
+            options: options
+        )
+    }
+
+    private func export(
+        target: String,
+        sourceURL: URL,
         to destinationURL: URL,
         revision: Int?,
         overwrite: Bool,
@@ -372,14 +462,14 @@ final class SVNCLIGateway: SVNClient, Sendable {
             .appendingPathComponent(".svnclient-partial-\(UUID().uuidString)")
         defer { try? fileManager.removeItem(at: partialURL) }
 
-        var arguments = ["export", Self.svnTarget(url.absoluteString), partialURL.path, "--ignore-externals"]
+        var arguments = ["export", target, partialURL.path, "--ignore-externals"]
         if let revision {
             arguments += ["--revision", String(revision)]
         }
         _ = try await executeAuthenticated(
             operation: "export",
             arguments: arguments,
-            urls: [url],
+            urls: [sourceURL],
             options: options
         )
 
@@ -388,6 +478,24 @@ final class SVNCLIGateway: SVNClient, Sendable {
         } else {
             try fileManager.moveItem(at: partialURL, to: destinationURL)
         }
+    }
+
+    func exportHistoricalVersion(
+        url: URL,
+        pegRevision: Int,
+        revision: Int,
+        to destinationURL: URL,
+        overwrite: Bool,
+        options: SVNRequestOptions
+    ) async throws {
+        try await export(
+            target: Self.svnTarget(url.absoluteString, pegRevision: pegRevision),
+            sourceURL: url,
+            to: destinationURL,
+            revision: revision,
+            overwrite: overwrite,
+            options: options
+        )
     }
 
     func makeDirectory(url: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
@@ -565,6 +673,11 @@ final class SVNCLIGateway: SVNClient, Sendable {
 
     private static func svnTarget(_ value: String) -> String {
         value.contains("@") ? value + "@" : value
+    }
+
+    private static func svnTarget(_ value: String, pegRevision: Int?) -> String {
+        guard let pegRevision else { return svnTarget(value) }
+        return "\(value)@\(pegRevision)"
     }
 
     private static func parseSVNDate(_ value: String) -> Date? {

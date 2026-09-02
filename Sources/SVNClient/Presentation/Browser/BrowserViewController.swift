@@ -18,6 +18,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private var favoriteMenuItem: NSMenuItem?
     private var operationTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
+    private var historyWindowController: NSWindowController?
 
     init(viewModel: BrowserViewModel) {
         self.viewModel = viewModel
@@ -130,6 +131,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         menu.addItem(withTitle: "重命名…", action: #selector(renameSelectedItem), keyEquivalent: "")
         menu.addItem(withTitle: "删除", action: #selector(deleteSelectedItem), keyEquivalent: "")
         menu.addItem(.separator())
+        menu.addItem(withTitle: "查看历史", action: #selector(showSelectedItemHistory), keyEquivalent: "")
         menu.addItem(withTitle: "查看信息", action: #selector(showSelectedItemInfo), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "复制显示路径", action: #selector(copySelectedDisplayPath), keyEquivalent: "")
@@ -493,6 +495,105 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         }
     }
 
+    @objc private func showSelectedItemHistory() {
+        guard let row = selectedRow, row.kind == .file else { return }
+        run {
+            let history = try await self.viewModel.history(for: row)
+            self.presentHistory(history)
+        }
+    }
+
+    private func presentHistory(_ history: BrowserFileHistory) {
+        let controller = FileHistoryViewController(history: history)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 460),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "\(history.displayName) — 历史版本"
+        window.minSize = NSSize(width: 620, height: 340)
+        window.contentViewController = controller
+        let windowController = NSWindowController(window: window)
+        historyWindowController?.close()
+        historyWindowController = windowController
+
+        controller.onDownload = { [weak self] entry in
+            self?.downloadHistoricalVersion(history, entry: entry)
+        }
+        controller.onOpen = { [weak self] entry in
+            guard self?.viewModel.isBusy == false else { return }
+            self?.run {
+                guard let self else { return }
+                let localURL = try await self.viewModel.localURLForOpening(
+                    history: history,
+                    revision: entry.revision
+                )
+                guard NSWorkspace.shared.open(localURL) else {
+                    throw BrowserOperationError.noApplication
+                }
+            }
+        }
+        controller.onRestore = { [weak self] entry in
+            self?.confirmRestore(history, entry: entry)
+        }
+        controller.onClose = { [weak self] in
+            self?.historyWindowController = nil
+        }
+        windowController.showWindow(self)
+        window.center()
+    }
+
+    private func downloadHistoricalVersion(_ history: BrowserFileHistory, entry: SVNLogEntry) {
+        guard !viewModel.isBusy else { return }
+        let panel = NSSavePanel()
+        panel.title = "下载 r\(entry.revision) 的历史版本"
+        panel.nameFieldStringValue = historicalFilename(history.displayName, revision: entry.revision)
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destinationURL = panel.url else { return }
+        let overwrite = FileManager.default.fileExists(atPath: destinationURL.path)
+        guard let resolved = resolveExistingDownload(destinationURL, overwrite: overwrite) else { return }
+        run {
+            try await self.viewModel.download(
+                history: history,
+                revision: entry.revision,
+                to: resolved.url,
+                overwrite: resolved.overwrite
+            )
+        }
+    }
+
+    private func confirmRestore(_ history: BrowserFileHistory, entry: SVNLogEntry) {
+        guard !viewModel.isBusy else { return }
+        let details = "将 r\(entry.revision) 的文件内容恢复到当前路径，并在当前 r\(history.currentRevision) 之后创建一个新版本。提交前会再次检查远端是否有更新。"
+        guard let message = prompt(
+            title: "恢复“\(history.displayName)”至 r\(entry.revision)？",
+            message: details,
+            fieldLabel: "提交说明",
+            initialValue: "恢复：\(history.displayName) 至 r\(entry.revision)",
+            confirmTitle: "恢复此版本",
+            destructive: true
+        ) else { return }
+        run {
+            _ = try await self.viewModel.restore(
+                history: history,
+                revision: entry.revision,
+                message: message
+            )
+            self.historyWindowController?.close()
+            self.historyWindowController = nil
+        }
+    }
+
+    private func historicalFilename(_ filename: String, revision: Int) -> String {
+        let url = URL(fileURLWithPath: filename)
+        let extensionName = url.pathExtension
+        let stem = url.deletingPathExtension().lastPathComponent
+        return extensionName.isEmpty
+            ? "\(stem)-r\(revision)"
+            : "\(stem)-r\(revision).\(extensionName)"
+    }
+
     private func presentInfo(_ info: SVNItemInfo) {
         let propertyText = info.properties.isEmpty
             ? "无"
@@ -703,6 +804,9 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             }
         }
         if menuItem.action == #selector(replaceSelectedItem) {
+            return row.kind == .file
+        }
+        if menuItem.action == #selector(showSelectedItemHistory) {
             return row.kind == .file
         }
         return true

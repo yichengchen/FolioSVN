@@ -284,6 +284,42 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.transfers.first?.state, .cancelled)
         XCTAssertEqual(viewModel.activeTransferCount, 0)
     }
+
+    func testHistoricalDownloadAndRestoreUsePegAndCurrentRevisionSnapshot() async throws {
+        let client = HistorySVNClient()
+        let viewModel = BrowserViewModel(svnClient: client)
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        try await viewModel.connect(to: rootURL)
+        let row = try XCTUnwrap(viewModel.rows.first)
+
+        let history = try await viewModel.history(for: row)
+
+        XCTAssertEqual(history.currentRevision, 9)
+        XCTAssertEqual(history.pegRevision, 12)
+        XCTAssertEqual(history.entries.map(\.revision), [9, 4])
+
+        let downloadURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("history-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: downloadURL) }
+        try await viewModel.download(history: history, revision: 4, to: downloadURL, overwrite: false)
+        XCTAssertEqual(try String(contentsOf: downloadURL, encoding: .utf8), "第四版内容")
+
+        let result = try await viewModel.restore(
+            history: history,
+            revision: 4,
+            message: "恢复旧版"
+        )
+
+        XCTAssertEqual(result.revision, 13)
+        let exports = await client.historicalExports
+        let replacedExpectedRevision = await client.replacedExpectedRevision
+        let replacedContents = await client.replacedContents
+        XCTAssertEqual(exports.count, 2)
+        XCTAssertTrue(exports.allSatisfy { $0.pegRevision == 12 && $0.revision == 4 })
+        XCTAssertEqual(replacedExpectedRevision, 9)
+        XCTAssertEqual(replacedContents, "第四版内容")
+        XCTAssertEqual(viewModel.noticeText, "已恢复 r4 的内容 · r13")
+    }
 }
 
 private final class MockSVNClient: SVNClient, Sendable {
@@ -462,5 +498,72 @@ private actor CancellableTransferSVNClient: SVNClient {
         options: SVNRequestOptions
     ) async throws {
         try await Task.sleep(for: .seconds(60))
+    }
+}
+
+private actor HistorySVNClient: SVNClient {
+    struct HistoricalExport: Sendable {
+        let pegRevision: Int
+        let revision: Int
+    }
+
+    private(set) var historicalExports: [HistoricalExport] = []
+    private(set) var replacedExpectedRevision: Int?
+    private(set) var replacedContents: String?
+
+    func version() async throws -> String { "1.14.5" }
+
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        [SVNListEntry(name: "说明.txt", kind: .file, size: 12, revision: 9, author: "lisi", updatedAt: nil)]
+    }
+
+    func info(url: URL, options: SVNRequestOptions) async throws -> SVNItemInfo {
+        SVNItemInfo(
+            name: "说明.txt",
+            url: url,
+            kind: .file,
+            size: 12,
+            revision: 12,
+            lastChangedRevision: 9,
+            author: "lisi",
+            updatedAt: nil,
+            properties: [:]
+        )
+    }
+
+    func log(
+        url: URL,
+        pegRevision: Int?,
+        limit: Int,
+        options: SVNRequestOptions
+    ) async throws -> [SVNLogEntry] {
+        [
+            SVNLogEntry(revision: 4, author: "zhangsan", date: nil, message: "第四版"),
+            SVNLogEntry(revision: 9, author: "lisi", date: nil, message: "第九版")
+        ]
+    }
+
+    func exportHistoricalVersion(
+        url: URL,
+        pegRevision: Int,
+        revision: Int,
+        to destinationURL: URL,
+        overwrite: Bool,
+        options: SVNRequestOptions
+    ) async throws {
+        historicalExports.append(HistoricalExport(pegRevision: pegRevision, revision: revision))
+        try Data("第四版内容".utf8).write(to: destinationURL)
+    }
+
+    func replace(
+        localFileURL: URL,
+        targetURL: URL,
+        expectedRevision: Int,
+        message: String,
+        options: SVNRequestOptions
+    ) async throws -> SVNWriteResult {
+        replacedExpectedRevision = expectedRevision
+        replacedContents = try String(contentsOf: localFileURL, encoding: .utf8)
+        return SVNWriteResult(revision: 13)
     }
 }

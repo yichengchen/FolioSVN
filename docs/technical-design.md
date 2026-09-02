@@ -272,6 +272,8 @@ checkout/update 目标父目录
 
 恢复 r100 的内容时，当前仓库假设为 r150。实现读取目标在 r100 的内容，将其覆盖到基于最新版本建立的工作文件，然后提交为 r151。这样 r101—r150 的历史仍可查，r151 清楚记录恢复动作。
 
+当前实现先以 `svn info` 取得节点的 peg revision 和 `lastChangedRevision` 快照，再执行 `svn log URL@PEG --xml --limit 100`。下载或打开旧版时使用 `svn export URL@PEG --revision REV`，因此不会改动仓库。恢复时把旧版导出到唯一临时目录，再调用与普通替换相同的双重并发校验：替换开始前核对服务端 `lastChangedRevision`，浅工作副本更新后再次核对，最后才 commit。任一检查发现远端变化都会返回 `remoteChanged`，临时文件随任务结束清理。
+
 ## 7. 命令执行安全
 
 ### 7.1 禁止 shell 拼接

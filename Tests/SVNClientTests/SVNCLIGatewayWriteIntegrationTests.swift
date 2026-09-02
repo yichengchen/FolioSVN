@@ -85,6 +85,43 @@ final class SVNCLIGatewayWriteIntegrationTests: XCTestCase {
         )
         XCTAssertEqual(try String(contentsOf: firstExport, encoding: .utf8), "第二版")
 
+        let history = try await gateway.log(
+            url: uploadedURL,
+            pegRevision: replacedInfo.revision,
+            limit: 100,
+            options: .anonymous
+        )
+        XCTAssertEqual(history.map(\.revision), [4, 3, 2])
+
+        let historicalExport = root.appendingPathComponent("historical-export.txt")
+        try await gateway.exportHistoricalVersion(
+            url: uploadedURL,
+            pegRevision: replacedInfo.revision,
+            revision: 2,
+            to: historicalExport,
+            overwrite: false,
+            options: .anonymous
+        )
+        XCTAssertEqual(try String(contentsOf: historicalExport, encoding: .utf8), "第一版")
+        let restoreResult = try await gateway.replace(
+            localFileURL: historicalExport,
+            targetURL: uploadedURL,
+            expectedRevision: try XCTUnwrap(replacedInfo.lastChangedRevision),
+            message: "恢复：说明.txt 至 r2",
+            options: .anonymous
+        )
+        XCTAssertEqual(restoreResult.revision, 5)
+
+        let restoredExport = root.appendingPathComponent("restored-export.txt")
+        try await gateway.export(
+            url: uploadedURL,
+            to: restoredExport,
+            revision: restoreResult.revision,
+            overwrite: false,
+            options: .anonymous
+        )
+        XCTAssertEqual(try String(contentsOf: restoredExport, encoding: .utf8), "第一版")
+
         let folderExport = root.appendingPathComponent("folder-export", isDirectory: true)
         try await gateway.export(
             url: documentURL,
@@ -95,7 +132,7 @@ final class SVNCLIGatewayWriteIntegrationTests: XCTestCase {
         )
         XCTAssertEqual(
             try String(contentsOf: folderExport.appendingPathComponent("说明.txt"), encoding: .utf8),
-            "第二版"
+            "第一版"
         )
 
         let renamedURL = documentURL.appendingPathComponent("使用说明.txt")
@@ -105,14 +142,21 @@ final class SVNCLIGatewayWriteIntegrationTests: XCTestCase {
             message: "重命名说明",
             options: .anonymous
         )
-        XCTAssertEqual(moveResult.revision, 5)
+        XCTAssertEqual(moveResult.revision, 6)
+        let renamedHistory = try await gateway.log(
+            url: renamedURL,
+            pegRevision: try XCTUnwrap(moveResult.revision),
+            limit: 100,
+            options: .anonymous
+        )
+        XCTAssertTrue(renamedHistory.contains(where: { $0.revision == 2 }))
 
         let deleteResult = try await gateway.delete(
             url: renamedURL,
             message: "删除说明",
             options: .anonymous
         )
-        XCTAssertEqual(deleteResult.revision, 6)
+        XCTAssertEqual(deleteResult.revision, 7)
         let remainingEntries = try await gateway.list(url: documentURL)
         XCTAssertTrue(remainingEntries.isEmpty)
     }
