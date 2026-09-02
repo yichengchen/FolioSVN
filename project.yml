@@ -61,6 +61,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.west2online.svnclient
         PRODUCT_NAME: SVNClient
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: SVN Client
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.business
