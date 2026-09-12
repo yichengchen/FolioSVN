@@ -5,8 +5,10 @@ protocol RepositoryMetadataStoring: Sendable {
     func favorites() async throws -> [FavoriteRepositoryItem]
     func favorite(profileID: UUID, url: URL) async throws -> FavoriteRepositoryItem?
     func upsertFavorite(_ favorite: FavoriteRepositoryItem) async throws
+    func upsertFavorites(_ favorites: [FavoriteRepositoryItem]) async throws
     func renameFavorite(id: UUID, name: String) async throws
     func removeFavorite(id: UUID) async throws
+    func removeFavorites(profileID: UUID, urls: [URL]) async throws
     func setFavoriteAvailability(id: UUID, isAvailable: Bool, revision: Int?) async throws
     func markFavoritesUnavailable(profileID: UUID, atOrBelow url: URL) async throws
     func replaceSearchIndex(profileID: UUID, rootURL: URL, entries: [SearchIndexEntry], indexedAt: Date) async throws
@@ -50,17 +52,24 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
     }
 
     func upsertFavorite(_ favorite: FavoriteRepositoryItem) throws {
+        try upsertFavorites([favorite])
+    }
+
+    func upsertFavorites(_ favorites: [FavoriteRepositoryItem]) throws {
+        guard !favorites.isEmpty else { return }
         try databaseQueue.write { database in
-            if let existing = try FavoriteRecord
-                .filter(Column("profileID") == favorite.profileID.uuidString && Column("url") == favorite.url.absoluteString)
-                .fetchOne(database) {
-                var updated = FavoriteRecord(favorite: favorite)
-                updated.id = existing.id
-                updated.createdAt = existing.createdAt
-                try updated.save(database)
-            } else {
-                var record = FavoriteRecord(favorite: favorite)
-                try record.insert(database)
+            for favorite in favorites {
+                if let existing = try FavoriteRecord
+                    .filter(Column("profileID") == favorite.profileID.uuidString && Column("url") == favorite.url.absoluteString)
+                    .fetchOne(database) {
+                    var updated = FavoriteRecord(favorite: favorite)
+                    updated.id = existing.id
+                    updated.createdAt = existing.createdAt
+                    try updated.save(database)
+                } else {
+                    var record = FavoriteRecord(favorite: favorite)
+                    try record.insert(database)
+                }
             }
         }
     }
@@ -68,6 +77,16 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
     func removeFavorite(id: UUID) throws {
         try databaseQueue.write { database in
             _ = try FavoriteRecord.deleteOne(database, key: id.uuidString)
+        }
+    }
+
+    func removeFavorites(profileID: UUID, urls: [URL]) throws {
+        guard !urls.isEmpty else { return }
+        let urlValues = urls.map(\.absoluteString)
+        try databaseQueue.write { database in
+            _ = try FavoriteRecord
+                .filter(Column("profileID") == profileID.uuidString && urlValues.contains(Column("url")))
+                .deleteAll(database)
         }
     }
 

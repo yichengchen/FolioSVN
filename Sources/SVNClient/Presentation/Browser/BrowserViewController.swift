@@ -16,13 +16,23 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private let emptyStateLabel = NSTextField(wrappingLabelWithString: "")
     private let scrollView = NSScrollView()
     private let outlineView = BrowserOutlineView()
+    private var openMenuItem: NSMenuItem?
+    private var downloadMenuItem: NSMenuItem?
+    private var replaceMenuItem: NSMenuItem?
+    private var renameMenuItem: NSMenuItem?
+    private var deleteMenuItem: NSMenuItem?
+    private var historyMenuItem: NSMenuItem?
+    private var infoMenuItem: NSMenuItem?
     private var favoriteMenuItem: NSMenuItem?
+    private var removeFavoriteMenuItem: NSMenuItem?
     private var uploadHereMenuItem: NSMenuItem?
     private var newFolderHereMenuItem: NSMenuItem?
     private var operationTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var quickLookTask: Task<Void, Never>?
     private var quickLookURL: URL?
+    private var filePromiseTasks: [UUID: Task<Void, Never>] = [:]
+    private var lastFilePromiseTask: Task<Void, Never>?
     private var historyWindowController: NSWindowController?
     private var rootNodes: [BrowserTreeNode] = []
     private var expandedURLKeys: Set<String> = []
@@ -125,7 +135,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         outlineView.usesAlternatingRowBackgroundColors = true
         outlineView.rowSizeStyle = .medium
         outlineView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        outlineView.allowsMultipleSelection = false
+        outlineView.allowsMultipleSelection = true
         outlineView.indentationPerLevel = 16
         outlineView.autoresizesOutlineColumn = false
         outlineView.registerForDraggedTypes([.fileURL])
@@ -142,21 +152,23 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
 
     private func configureContextMenu() {
         let menu = NSMenu()
-        menu.addItem(withTitle: "打开", action: #selector(openSelectedItem), keyEquivalent: "")
-        menu.addItem(withTitle: "下载…", action: #selector(downloadSelectedItem), keyEquivalent: "")
-        menu.addItem(withTitle: "替换…", action: #selector(replaceSelectedItem), keyEquivalent: "")
+        openMenuItem = menu.addItem(withTitle: "打开", action: #selector(openSelectedItem), keyEquivalent: "")
+        downloadMenuItem = menu.addItem(withTitle: "下载…", action: #selector(downloadSelectedItem), keyEquivalent: "")
+        replaceMenuItem = menu.addItem(withTitle: "替换…", action: #selector(replaceSelectedItem), keyEquivalent: "")
         let uploadHere = menu.addItem(withTitle: "上传到这里…", action: #selector(uploadToSelectedFolder), keyEquivalent: "")
         uploadHereMenuItem = uploadHere
         let newFolderHere = menu.addItem(withTitle: "在这里新建文件夹…", action: #selector(createFolderInSelectedFolder), keyEquivalent: "")
         newFolderHereMenuItem = newFolderHere
         let favoriteItem = menu.addItem(withTitle: "添加到收藏", action: #selector(toggleFavoriteForSelectedItem), keyEquivalent: "")
         favoriteMenuItem = favoriteItem
+        let removeFavoriteItem = menu.addItem(withTitle: "从收藏移除", action: #selector(removeFavoritesForSelectedItems), keyEquivalent: "")
+        removeFavoriteMenuItem = removeFavoriteItem
         menu.addItem(.separator())
-        menu.addItem(withTitle: "重命名…", action: #selector(renameSelectedItem), keyEquivalent: "")
-        menu.addItem(withTitle: "删除", action: #selector(deleteSelectedItem), keyEquivalent: "")
+        renameMenuItem = menu.addItem(withTitle: "重命名…", action: #selector(renameSelectedItem), keyEquivalent: "")
+        deleteMenuItem = menu.addItem(withTitle: "删除", action: #selector(deleteSelectedItem), keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "查看历史", action: #selector(showSelectedItemHistory), keyEquivalent: "")
-        menu.addItem(withTitle: "查看信息", action: #selector(showSelectedItemInfo), keyEquivalent: "")
+        historyMenuItem = menu.addItem(withTitle: "查看历史", action: #selector(showSelectedItemHistory), keyEquivalent: "")
+        infoMenuItem = menu.addItem(withTitle: "查看信息", action: #selector(showSelectedItemInfo), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "复制显示路径", action: #selector(copySelectedDisplayPath), keyEquivalent: "")
         menu.addItem(withTitle: "复制仓库 URL", action: #selector(copySelectedRepositoryURL), keyEquivalent: "")
@@ -170,14 +182,30 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         if let event = NSApp.currentEvent, event.window === view.window {
             let point = outlineView.convert(event.locationInWindow, from: nil)
             let clickedRow = outlineView.row(at: point)
-            if clickedRow >= 0 {
+            if clickedRow >= 0, !outlineView.selectedRowIndexes.contains(clickedRow) {
                 outlineView.selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
             }
         }
-        guard let row = selectedRow else { return }
-        favoriteMenuItem?.title = viewModel.isFavorite(row) ? "从收藏移除" : "添加到收藏"
-        uploadHereMenuItem?.isHidden = row.kind != .directory
-        newFolderHereMenuItem?.isHidden = row.kind != .directory
+        let rows = selectedNodes.map(\.row)
+        let operationRows = effectiveSelectedNodes.map(\.row)
+        guard !rows.isEmpty, !operationRows.isEmpty else { return }
+        let favoriteCount = rows.filter(viewModel.isFavorite).count
+        let missingFavoriteCount = rows.count - favoriteCount
+        favoriteMenuItem?.isHidden = missingFavoriteCount == 0
+        favoriteMenuItem?.title = missingFavoriteCount == 1 ? "添加到收藏" : "添加 \(missingFavoriteCount) 项到收藏"
+        removeFavoriteMenuItem?.isHidden = favoriteCount == 0
+        removeFavoriteMenuItem?.title = favoriteCount == 1 ? "从收藏移除" : "从收藏移除 \(favoriteCount) 项"
+        downloadMenuItem?.title = operationRows.count == 1 ? "下载…" : "下载 \(operationRows.count) 项…"
+        deleteMenuItem?.title = operationRows.count == 1 ? "删除" : "删除 \(operationRows.count) 项…"
+        let isSingleSelection = rows.count == 1
+        openMenuItem?.isHidden = !isSingleSelection
+        replaceMenuItem?.isHidden = !isSingleSelection
+        renameMenuItem?.isHidden = !isSingleSelection
+        historyMenuItem?.isHidden = !isSingleSelection
+        infoMenuItem?.isHidden = !isSingleSelection
+        guard let row = rows.first else { return }
+        uploadHereMenuItem?.isHidden = !isSingleSelection || row.kind != .directory
+        newFolderHereMenuItem?.isHidden = !isSingleSelection || row.kind != .directory
     }
 
     private func configureLayout() {
@@ -324,7 +352,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             || generationChanged
         guard contentChanged else { return }
 
-        let selectedURL = selectedRow?.url
+        let selectedURLs = Set(selectedNodes.map { $0.row.url })
         let reusableNodes = generationChanged || profileChanged ? [:] : treeNodeMap(rootNodes)
         if profileChanged { expandedURLKeys.removeAll() }
         if generationChanged || profileChanged || renderedCurrentURL != viewModel.currentURL || renderedSearchMode != viewModel.isShowingSearchResults {
@@ -345,11 +373,11 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         renderedTreeGeneration = viewModel.directoryTreeGeneration
         outlineView.reloadData()
         guard !viewModel.isShowingSearchResults else {
-            restoreSelection(url: selectedURL)
+            restoreSelection(urls: selectedURLs)
             return
         }
         restoreExpandedState(in: rootNodes)
-        restoreSelection(url: selectedURL)
+        restoreSelection(urls: selectedURLs)
     }
 
     private func treeNodeMap(_ nodes: [BrowserTreeNode]) -> [String: BrowserTreeNode] {
@@ -374,11 +402,15 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         }
     }
 
-    private func restoreSelection(url: URL?) {
-        guard let url, let node = treeNodeMap(rootNodes)[url.absoluteString] else { return }
-        let row = outlineView.row(forItem: node)
-        guard row >= 0 else { return }
-        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    private func restoreSelection(urls: Set<URL>) {
+        let nodeMap = treeNodeMap(rootNodes)
+        let rows = urls.compactMap { url -> Int? in
+            guard let node = nodeMap[url.absoluteString] else { return nil }
+            let row = outlineView.row(forItem: node)
+            return row >= 0 ? row : nil
+        }
+        guard !rows.isEmpty else { return }
+        outlineView.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
     }
 
     private func loadChildren(for node: BrowserTreeNode, forceReload: Bool = false) {
@@ -493,9 +525,30 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         run { try await self.viewModel.navigate(to: sender.url) }
     }
 
+    private var selectedNodes: [BrowserTreeNode] {
+        outlineView.selectedRowIndexes.compactMap { outlineView.item(atRow: $0) as? BrowserTreeNode }
+    }
+
+    private var effectiveSelectedNodes: [BrowserTreeNode] {
+        let nodes = selectedNodes
+        let directoryURLs = nodes.filter { $0.row.kind == .directory }.map { $0.row.url }
+        return nodes.filter { node in
+            !directoryURLs.contains { directoryURL in
+                directoryURL != node.row.url && Self.isDescendant(node.row.url, of: directoryURL)
+            }
+        }
+    }
+
+    private static func isDescendant(_ candidate: URL, of directory: URL) -> Bool {
+        let directoryValue = directory.absoluteString.hasSuffix("/")
+            ? directory.absoluteString
+            : directory.absoluteString + "/"
+        return candidate.absoluteString.hasPrefix(directoryValue)
+    }
+
     private var selectedNode: BrowserTreeNode? {
-        guard outlineView.selectedRow >= 0 else { return nil }
-        return outlineView.item(atRow: outlineView.selectedRow) as? BrowserTreeNode
+        let nodes = selectedNodes
+        return nodes.count == 1 ? nodes[0] : nil
     }
 
     private var selectedRow: BrowserRow? {
@@ -573,7 +626,42 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     }
 
     @objc private func downloadSelectedItem() {
-        guard let row = selectedRow else { return }
+        let rows = effectiveSelectedNodes.map(\.row)
+        guard !rows.isEmpty else { return }
+        guard rows.count > 1 else {
+            downloadSingleItem(rows[0])
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.title = "选择保存 \(rows.count) 个项目的位置"
+        panel.prompt = "选择"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let directoryURL = panel.url else { return }
+
+        let baseDestinations = rows.map { directoryURL.appendingPathComponent($0.name, isDirectory: $0.kind == .directory) }
+        let names = rows.map(\.name)
+        let hasDuplicateNames = Set(names).count != names.count
+        let hasExistingFiles = baseDestinations.contains { FileManager.default.fileExists(atPath: $0.path) }
+        let resolution: BatchDownloadConflictResolution
+        if hasDuplicateNames || hasExistingFiles {
+            guard let selectedResolution = promptForBatchDownloadConflict(
+                duplicateNames: hasDuplicateNames,
+                existingFiles: hasExistingFiles
+            ) else { return }
+            resolution = selectedResolution
+        } else {
+            resolution = .replace
+        }
+        let items = makeBatchDownloadItems(rows: rows, directoryURL: directoryURL, resolution: resolution)
+        guard !items.isEmpty else { return }
+        run { try await self.viewModel.download(items, to: directoryURL) }
+    }
+
+    private func downloadSingleItem(_ row: BrowserRow) {
         let panel = NSSavePanel()
         panel.title = row.kind == .directory ? "下载文件夹" : "下载文件"
         panel.nameFieldStringValue = row.name
@@ -582,6 +670,85 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         let overwrite = FileManager.default.fileExists(atPath: destinationURL.path)
         guard let resolved = resolveExistingDownload(destinationURL, overwrite: overwrite) else { return }
         run { try await self.viewModel.download(row, to: resolved.url, overwrite: resolved.overwrite) }
+    }
+
+    private func promptForBatchDownloadConflict(
+        duplicateNames: Bool,
+        existingFiles: Bool
+    ) -> BatchDownloadConflictResolution? {
+        let alert = NSAlert()
+        alert.messageText = "部分项目存在名称冲突"
+        var reasons: [String] = []
+        if existingFiles { reasons.append("目标文件夹中已有同名项目") }
+        if duplicateNames { reasons.append("选中的不同位置包含同名项目") }
+        alert.informativeText = reasons.joined(separator: "；") + "。请选择统一处理方式。"
+        alert.addButton(withTitle: "替换已有项目")
+        alert.addButton(withTitle: "保留两者")
+        alert.addButton(withTitle: "跳过冲突")
+        alert.addButton(withTitle: "取消")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .replace
+        case .alertSecondButtonReturn: return .keepBoth
+        case .alertThirdButtonReturn: return .skip
+        default: return nil
+        }
+    }
+
+    private func makeBatchDownloadItems(
+        rows: [BrowserRow],
+        directoryURL: URL,
+        resolution: BatchDownloadConflictResolution
+    ) -> [BrowserBatchDownloadItem] {
+        var reservedPaths: Set<String> = []
+        var items: [BrowserBatchDownloadItem] = []
+        for row in rows {
+            guard let request = viewModel.downloadRequest(for: row) else { continue }
+            let baseURL = directoryURL.appendingPathComponent(row.name, isDirectory: row.kind == .directory)
+            let exists = FileManager.default.fileExists(atPath: baseURL.path)
+            let isReserved = reservedPaths.contains(baseURL.path)
+            let destinationURL: URL
+            let overwrite: Bool
+            switch resolution {
+            case .replace:
+                destinationURL = isReserved
+                    ? uniqueBatchDestination(for: baseURL, reservedPaths: reservedPaths)
+                    : baseURL
+                overwrite = exists && !isReserved
+            case .keepBoth:
+                destinationURL = exists || isReserved
+                    ? uniqueBatchDestination(for: baseURL, reservedPaths: reservedPaths)
+                    : baseURL
+                overwrite = false
+            case .skip:
+                guard !exists, !isReserved else { continue }
+                destinationURL = baseURL
+                overwrite = false
+            }
+            reservedPaths.insert(destinationURL.path)
+            items.append(BrowserBatchDownloadItem(
+                request: request,
+                destinationURL: destinationURL,
+                overwrite: overwrite
+            ))
+        }
+        return items
+    }
+
+    private func uniqueBatchDestination(for url: URL, reservedPaths: Set<String>) -> URL {
+        var candidate = uniqueSiblingURL(for: url)
+        var index = 2
+        while reservedPaths.contains(candidate.path) || FileManager.default.fileExists(atPath: candidate.path) {
+            let extensionName = url.pathExtension
+            let baseName = extensionName.isEmpty
+                ? url.lastPathComponent
+                : String(url.lastPathComponent.dropLast(extensionName.count + 1))
+            let name = extensionName.isEmpty
+                ? "\(baseName) \(index)"
+                : "\(baseName) \(index).\(extensionName)"
+            candidate = url.deletingLastPathComponent().appendingPathComponent(name)
+            index += 1
+        }
+        return candidate
     }
 
     private func chooseFilesForUpload(targetDirectory: BrowserTreeNode? = nil) {
@@ -665,8 +832,15 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     }
 
     @objc private func toggleFavoriteForSelectedItem() {
-        guard let row = selectedRow else { return }
-        run { _ = try await self.viewModel.toggleFavorite(row) }
+        let rows = selectedNodes.map(\.row).filter { !viewModel.isFavorite($0) }
+        guard !rows.isEmpty else { return }
+        run { _ = try await self.viewModel.setFavorites(rows, isFavorite: true) }
+    }
+
+    @objc private func removeFavoritesForSelectedItems() {
+        let rows = selectedNodes.map(\.row).filter(viewModel.isFavorite)
+        guard !rows.isEmpty else { return }
+        run { _ = try await self.viewModel.setFavorites(rows, isFavorite: false) }
     }
 
     private func confirmReplace(row: BrowserRow, localURL: URL) {
@@ -756,18 +930,29 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     }
 
     @objc private func deleteSelectedItem() {
-        guard let row = selectedRow else { return }
+        let rows = effectiveSelectedNodes.map(\.row)
+        guard !rows.isEmpty else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "删除“\(row.name)”？"
-        alert.informativeText = row.kind == .directory
-            ? "该文件夹及其中的全部内容都会从当前版本删除。操作会提交到仓库，仍可从历史追溯。"
-            : "此操作会提交到仓库。文件仍可从历史找回，但当前目录中将不再显示。"
+        if rows.count == 1, let row = rows.first {
+            alert.messageText = "删除“\(row.name)”？"
+            alert.informativeText = row.kind == .directory
+                ? "该文件夹及其中的全部内容都会从当前版本删除。操作会提交到仓库，仍可从历史追溯。"
+                : "此操作会提交到仓库。文件仍可从历史找回，但当前目录中将不再显示。"
+        } else {
+            let directoryCount = rows.filter { $0.kind == .directory }.count
+            let directoryWarning = directoryCount > 0
+                ? "其中包含 \(directoryCount) 个文件夹，文件夹内的全部内容也会被删除。"
+                : ""
+            alert.messageText = "删除选中的 \(rows.count) 项？"
+            alert.informativeText = "\(directoryWarning)这些更改会作为一次提交写入仓库，仍可从历史追溯。"
+        }
         alert.addButton(withTitle: "删除")
         alert.addButton(withTitle: "取消")
         alert.buttons.first?.hasDestructiveAction = true
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        run { _ = try await self.viewModel.delete(row, message: "删除：\(row.name)") }
+        let message = rows.count == 1 ? "删除：\(rows[0].name)" : "删除 \(rows.count) 项"
+        run { _ = try await self.viewModel.delete(rows, message: message) }
     }
 
     @objc private func showSelectedItemInfo() {
@@ -1021,6 +1206,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         operationTask?.cancel()
         searchTask?.cancel()
         quickLookTask?.cancel()
+        filePromiseTasks.values.forEach { $0.cancel() }
     }
 
     @objc private func showTransferTasks() {
@@ -1075,6 +1261,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         if case .completed = transfer.state,
            let outputURL = transfer.outputURL,
            FileManager.default.fileExists(atPath: outputURL.path) {
+            let isDirectory = (try? outputURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
             let reveal = menu.addItem(
                 withTitle: "在 Finder 中显示",
                 action: #selector(revealTransferOutput(_:)),
@@ -1083,7 +1270,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             reveal.target = self
             reveal.representedObject = identifier
             let open = menu.addItem(
-                withTitle: "打开文件",
+                withTitle: isDirectory ? "打开目标文件夹" : "打开文件",
                 action: #selector(openTransferOutput(_:)),
                 keyEquivalent: ""
             )
@@ -1181,7 +1368,18 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         default:
             break
         }
-        guard let row = selectedRow, !viewModel.isBusy else { return false }
+        let rows = selectedNodes.map(\.row)
+        let operationRows = effectiveSelectedNodes.map(\.row)
+        guard !rows.isEmpty, !operationRows.isEmpty, !viewModel.isBusy else { return false }
+        if menuItem.action == #selector(downloadSelectedItem) {
+            return true
+        }
+        if menuItem.action == #selector(toggleFavoriteForSelectedItem) {
+            return rows.contains { !viewModel.isFavorite($0) }
+        }
+        if menuItem.action == #selector(removeFavoritesForSelectedItems) {
+            return rows.contains(where: viewModel.isFavorite)
+        }
         if viewModel.isShowingSearchResults {
             switch menuItem.action {
             case #selector(renameSelectedItem), #selector(deleteSelectedItem), #selector(replaceSelectedItem):
@@ -1190,6 +1388,10 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
                 break
             }
         }
+        if menuItem.action == #selector(deleteSelectedItem) {
+            return true
+        }
+        guard rows.count == 1, let row = rows.first else { return false }
         if menuItem.action == #selector(replaceSelectedItem) {
             return row.kind == .file
         }
@@ -1413,6 +1615,12 @@ private final class BrowserTreePlaceholder: NSObject {
     }
 }
 
+private enum BatchDownloadConflictResolution {
+    case replace
+    case keepBoth
+    case skip
+}
+
 @MainActor
 private final class BrowserOutlineView: NSOutlineView {
     var onSpaceKey: (() -> Void)?
@@ -1438,20 +1646,25 @@ private extension BrowserViewController {
         to destinationURL: URL,
         completion: FilePromiseCompletion
     ) {
+        let identifier = UUID()
+        let previousTask = lastFilePromiseTask
         let task = Task { @MainActor [weak self] in
             guard let self else {
                 completion.call(CancellationError())
                 return
             }
-            defer { self.operationTask = nil }
+            if let previousTask { _ = await previousTask.result }
+            defer { self.filePromiseTasks.removeValue(forKey: identifier) }
             do {
+                try Task.checkCancellation()
                 try await viewModel.download(request, to: destinationURL, overwrite: false)
                 completion.call(nil)
             } catch {
                 completion.call(error)
             }
         }
-        operationTask = task
+        filePromiseTasks[identifier] = task
+        lastFilePromiseTask = task
     }
 }
 

@@ -214,6 +214,86 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.isFavorite(file))
     }
 
+    func testBatchFavoritesUpdateAllRowsWithOneViewModelOperation() async throws {
+        let store = try RepositoryMetadataStore(inMemory: ())
+        let metadata = RepositoryMetadataService(store: store)
+        let viewModel = BrowserViewModel(svnClient: SearchSVNClient(), metadataService: metadata)
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        let profile = RepositoryProfile(
+            id: UUID(), displayName: "公司文档", baseURL: rootURL, username: "",
+            certificatePolicy: .strict, createdAt: .now, updatedAt: .now
+        )
+        try await viewModel.connect(profile: profile, password: nil)
+
+        let rows = viewModel.rows
+        let addedCount = try await viewModel.setFavorites(rows, isFavorite: true)
+        XCTAssertEqual(addedCount, rows.count)
+        XCTAssertEqual(viewModel.noticeText, "已添加 \(rows.count) 项到收藏")
+        XCTAssertTrue(rows.allSatisfy(viewModel.isFavorite))
+        let storedFavoriteCount = try await metadata.favorites().count
+        XCTAssertEqual(storedFavoriteCount, rows.count)
+
+        let removedCount = try await viewModel.setFavorites([rows[0]], isFavorite: false)
+        XCTAssertEqual(removedCount, 1)
+        XCTAssertFalse(viewModel.isFavorite(rows[0]))
+        XCTAssertTrue(viewModel.isFavorite(rows[1]))
+    }
+
+    func testBatchDeleteSendsAllTargetsAsOneWrite() async throws {
+        let client = BatchDeleteSVNClient()
+        let viewModel = BrowserViewModel(svnClient: client)
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        try await viewModel.connect(to: rootURL)
+        let rows = viewModel.rows
+
+        let result = try await viewModel.delete(rows, message: "删除 2 项")
+        let deletedURLBatches = await client.deletedURLBatches
+        let deleteMessages = await client.deleteMessages
+
+        XCTAssertEqual(result.revision, 18)
+        XCTAssertEqual(deletedURLBatches, [rows.map(\.url)])
+        XCTAssertEqual(deleteMessages, ["删除 2 项"])
+        XCTAssertEqual(viewModel.noticeText, "已删除 2 项 · r18")
+    }
+
+    func testBatchDownloadContinuesAfterAnItemFailsAndReportsSummary() async throws {
+        let client = BatchDownloadSVNClient()
+        let viewModel = BrowserViewModel(svnClient: client)
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batch-download-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let successURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/成功.txt"))
+        let failureURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/失败.txt"))
+        let items = [successURL, failureURL].map { sourceURL in
+            BrowserBatchDownloadItem(
+                request: BrowserDownloadRequest(
+                    sourceURL: sourceURL,
+                    displayName: sourceURL.lastPathComponent,
+                    byteSize: 10,
+                    revision: 3,
+                    options: .anonymous
+                ),
+                destinationURL: directoryURL.appendingPathComponent(sourceURL.lastPathComponent),
+                overwrite: false
+            )
+        }
+
+        do {
+            try await viewModel.download(items, to: directoryURL)
+            XCTFail("Expected one failed download")
+        } catch let failure as BrowserBatchDownloadFailure {
+            XCTAssertEqual(failure.completedCount, 1)
+            XCTAssertEqual(failure.failures, ["失败.txt"])
+        }
+
+        let exportedNames = await client.exportedNames
+        XCTAssertEqual(exportedNames, ["成功.txt", "失败.txt"])
+        guard case .failed = viewModel.transfers.first?.state else {
+            return XCTFail("Expected a failed parent transfer")
+        }
+    }
+
     func testDirectoryNavigationUsesCacheAndRefreshForcesOneServerReload() async throws {
         let store = try RepositoryMetadataStore(inMemory: ())
         let metadata = RepositoryMetadataService(store: store)
@@ -657,6 +737,47 @@ private actor HistorySVNClient: SVNClient {
         replacedExpectedRevision = expectedRevision
         replacedContents = try String(contentsOf: localFileURL, encoding: .utf8)
         return SVNWriteResult(revision: 13)
+    }
+}
+
+private actor BatchDeleteSVNClient: SVNClient {
+    private(set) var deletedURLBatches: [[URL]] = []
+    private(set) var deleteMessages: [String] = []
+
+    func version() async throws -> String { "1.14.5" }
+
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        [
+            SVNListEntry(name: "说明.txt", kind: .file, size: 10, revision: 17, author: nil, updatedAt: nil),
+            SVNListEntry(name: "资料", kind: .directory, size: nil, revision: 16, author: nil, updatedAt: nil)
+        ]
+    }
+
+    func delete(urls: [URL], message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
+        deletedURLBatches.append(urls)
+        deleteMessages.append(message)
+        return SVNWriteResult(revision: 18)
+    }
+}
+
+private actor BatchDownloadSVNClient: SVNClient {
+    private(set) var exportedNames: [String] = []
+
+    func version() async throws -> String { "1.14.5" }
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] { [] }
+
+    func export(
+        url: URL,
+        to destinationURL: URL,
+        revision: Int?,
+        overwrite: Bool,
+        options: SVNRequestOptions
+    ) async throws {
+        exportedNames.append(url.lastPathComponent)
+        if url.lastPathComponent == "失败.txt" {
+            throw SVNClientError.invalidListXML
+        }
+        try Data("success".utf8).write(to: destinationURL)
     }
 }
 

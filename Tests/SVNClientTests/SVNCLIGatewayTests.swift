@@ -212,6 +212,30 @@ final class SVNCLIGatewayTests: XCTestCase {
         ))
     }
 
+    func testBatchDeleteUsesOneSVNCommitWithAllTargets() async throws {
+        let runner = MockSVNCommandRunner(output: .success(stdout: "Committed revision 24.\n"))
+        let gateway = makeMockGateway(runner)
+        let first = try XCTUnwrap(URL(string: "https://svn.example.com/repo/说明.txt"))
+        let second = try XCTUnwrap(URL(string: "https://svn.example.com/repo/资料"))
+
+        let result = try await gateway.delete(
+            urls: [first, second],
+            message: "删除 2 项",
+            options: .anonymous
+        )
+
+        XCTAssertEqual(result.revision, 24)
+        XCTAssertEqual(
+            runner.calls.single,
+            [
+                "svn", "delete",
+                "https://svn.example.com/repo/%E8%AF%B4%E6%98%8E.txt",
+                "https://svn.example.com/repo/%E8%B5%84%E6%96%99",
+                "--message", "删除 2 项", "--non-interactive"
+            ]
+        )
+    }
+
     func testNonZeroExitBecomesStructuredError() async {
         let runner = MockSVNCommandRunner(output: .init(stdout: "", stderr: "E170013: Unable to connect", status: 1))
         let gateway = makeMockGateway(runner)

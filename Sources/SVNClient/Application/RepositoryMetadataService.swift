@@ -1,5 +1,12 @@
 import Foundation
 
+struct RepositoryFavoriteCandidate: Equatable, Sendable {
+    let url: URL
+    let name: String
+    let kind: SavedRepositoryItemKind
+    let revision: Int?
+}
+
 actor RepositoryMetadataService {
     private let store: any RepositoryMetadataStoring
 
@@ -40,6 +47,38 @@ actor RepositoryMetadataService {
 
     func removeFavorite(id: UUID) async throws {
         try await store.removeFavorite(id: id)
+    }
+
+    @discardableResult
+    func setFavorites(
+        profileID: UUID,
+        candidates: [RepositoryFavoriteCandidate],
+        isFavorite: Bool
+    ) async throws -> Int {
+        guard !candidates.isEmpty else { return 0 }
+        let existing = try await store.favorites().filter { $0.profileID == profileID }
+        let existingURLs = Set(existing.map { $0.url.absoluteString })
+        if isFavorite {
+            let missing = candidates.filter { !existingURLs.contains($0.url.absoluteString) }
+            let now = Date()
+            try await store.upsertFavorites(missing.map { candidate in
+                FavoriteRepositoryItem(
+                    id: UUID(),
+                    profileID: profileID,
+                    url: candidate.url,
+                    name: candidate.name,
+                    kind: candidate.kind,
+                    lastKnownRevision: candidate.revision,
+                    isAvailable: true,
+                    createdAt: now,
+                    updatedAt: now
+                )
+            })
+            return missing.count
+        }
+        let removable = candidates.filter { existingURLs.contains($0.url.absoluteString) }
+        try await store.removeFavorites(profileID: profileID, urls: removable.map(\.url))
+        return removable.count
     }
 
     func renameFavorite(id: UUID, name: String) async throws {

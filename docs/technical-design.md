@@ -77,6 +77,8 @@ Debug 阶段允许使用外部 CLI；生产版随附经过签名的固定版本�
 
 列表更新优先使用 macOS 26 的系统差量数据源/快照 API。界面层不直接调用 `Process`、GRDB、Alamofire 或 KeychainAccess，也不保存仓库状态的最终真相。
 
+文件列表允许多选，并在进入业务层前生成“有效选择集”：若一个目录及其后代同时被选中，递归下载和删除只保留目录节点，避免同一路径被处理两次。收藏不采用该折叠规则，因为收藏目录不代表收藏其子项。重命名、替换、历史、信息和打开只在单选时启用。
+
 ### 4.1 Repository Browser
 
 职责：
@@ -153,6 +155,8 @@ protocol SVNClient {
 
 当前实现由浏览器 View Model 保存最近 20 条会话内任务摘要，状态栏菜单展示任务类型、文件或数量、大小/目标位置、当前阶段、运行结果和失败原因。普通下载和 Finder 拖出下载共用同一任务模型与取消入口；成功下载可直接打开或在 Finder 中显示，失败下载会沿用创建任务时冻结的 URL、revision、认证选项和目标位置安全重试。上传、替换进入 SVN 写操作后不提供取消或自动重试，避免 commit 已落库但客户端误报失败后再次写入。应用退出前若仍有传输任务，会提示用户继续等待或确认中断。
 
+批量下载由一个父任务串行导出各目标：这样单个 `BrowserViewModel` 的任务状态不会产生竞态，也避免同时启动大量 SVN 进程。普通批量下载允许单项失败后继续并汇总结果；Finder 的多个 `NSFilePromiseProvider` 同样通过串行队列兑现，每个承诺都必须独立调用完成回调。批量删除则不同：所有 URL 一次传给 `svn delete ... --message`，确保只产生一个 revision；命令成功后目录缓存和收藏元数据只刷新一次。
+
 状态机：
 
 ```text
@@ -175,6 +179,8 @@ queued → preparing → running → verifying → succeeded
 - 任务摘要和缓存清理信息。
 
 数据库不保存：密码、令牌、完整文档正文、服务端 ACL 副本。
+
+批量添加或移除收藏必须在单个 GRDB 写事务中完成，界面完成整批更新后只发布一次元数据变化通知，避免侧边栏按条目反复刷新。
 
 ### 4.6 Search Indexer
 
@@ -237,7 +243,7 @@ struct HistoryItem: Identifiable {
 | 打开文件 | export 到缓存后 `NSWorkspace.open` | 缓存键包含仓库、路径和 revision |
 | 新建文件夹 | `svn mkdir URL -m MESSAGE` | 可直接 URL commit |
 | 重命名/移动 | `svn move OLD_URL NEW_URL -m MESSAGE` | 保留 copy history |
-| 删除 | `svn delete URL -m MESSAGE` | 删除仍存在于历史 |
+| 删除 | `svn delete URL... -m MESSAGE` | 多个目标可作为一次提交；删除仍存在于历史 |
 | 查看历史 | `svn log URL --xml` | 按页/数量加载 |
 | 搜索索引 | `svn list -R URL --xml` | 大仓库在后台运行 |
 | 上传新文件 | 临时 checkout → copy → `svn add` → `svn commit` | 提交前校验父目录状态 |

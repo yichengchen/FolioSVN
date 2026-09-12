@@ -26,6 +26,21 @@ final class RepositoryMetadataStoreTests: XCTestCase {
         XCTAssertTrue(remainingFavorites.isEmpty)
     }
 
+    func testFavoriteBatchAddAndRemoveAreAppliedTogether() async throws {
+        let store = try RepositoryMetadataStore(inMemory: ())
+        let profileID = UUID()
+        let first = makeFavorite(profileID: profileID, path: "技术部/接口说明.pdf")
+        let second = makeFavorite(profileID: profileID, path: "技术部/接入模板.docx")
+
+        try await store.upsertFavorites([first, second])
+        let addedFavorites = try await store.favorites()
+        XCTAssertEqual(Set(addedFavorites.map(\.url)), Set([first.url, second.url]))
+
+        try await store.removeFavorites(profileID: profileID, urls: [first.url, second.url])
+        let remainingFavorites = try await store.favorites()
+        XCTAssertTrue(remainingFavorites.isEmpty)
+    }
+
     func testSearchIsCaseInsensitiveAndCanLimitToCurrentDirectoryTree() async throws {
         let store = try RepositoryMetadataStore(inMemory: ())
         let profileID = UUID()

@@ -12,6 +12,7 @@ protocol SVNClient: Sendable {
     func makeDirectory(url: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult
     func move(from sourceURL: URL, to destinationURL: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult
     func delete(url: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult
+    func delete(urls: [URL], message: String, options: SVNRequestOptions) async throws -> SVNWriteResult
     func upload(files: [URL], to directoryURL: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult
     func replace(localFileURL: URL, targetURL: URL, expectedRevision: Int, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult
 }
@@ -64,6 +65,11 @@ extension SVNClient {
 
     func delete(url: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
         throw SVNClientError.unsupportedOperation
+    }
+
+    func delete(urls: [URL], message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
+        guard urls.count == 1, let url = urls.first else { throw SVNClientError.unsupportedOperation }
+        return try await delete(url: url, message: message, options: options)
     }
 
     func upload(files: [URL], to directoryURL: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
@@ -524,10 +530,15 @@ final class SVNCLIGateway: SVNClient, Sendable {
     }
 
     func delete(url: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
+        try await delete(urls: [url], message: message, options: options)
+    }
+
+    func delete(urls: [URL], message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
+        guard !urls.isEmpty else { throw SVNClientError.unsupportedOperation }
         let output = try await executeAuthenticated(
             operation: "delete",
-            arguments: ["delete", Self.svnTarget(url.absoluteString), "--message", message],
-            urls: [url],
+            arguments: ["delete"] + urls.map { Self.svnTarget($0.absoluteString) } + ["--message", message],
+            urls: urls,
             options: options
         )
         return SVNWriteResult(revision: Self.parseCommittedRevision(output))

@@ -24,6 +24,23 @@ struct BrowserHistoricalDownloadRequest: Equatable, Sendable {
     let options: SVNRequestOptions
 }
 
+struct BrowserBatchDownloadItem: Equatable, Sendable {
+    let request: BrowserDownloadRequest
+    let destinationURL: URL
+    let overwrite: Bool
+}
+
+struct BrowserBatchDownloadFailure: LocalizedError, Sendable {
+    let completedCount: Int
+    let failures: [String]
+
+    var errorDescription: String? {
+        let names = failures.prefix(3).joined(separator: "、")
+        let remaining = failures.count > 3 ? "等" : ""
+        return "已完成 \(completedCount) 项，\(failures.count) 项下载失败：\(names)\(remaining)"
+    }
+}
+
 struct BrowserFileHistory: Sendable {
     let profileID: UUID
     let sourceURL: URL
@@ -362,6 +379,49 @@ final class BrowserViewModel {
         onChange?()
     }
 
+    func download(_ items: [BrowserBatchDownloadItem], to directoryURL: URL) async throws {
+        guard !items.isEmpty else { return }
+        let totalBytes = items.compactMap(\.request.byteSize).reduce(0, +)
+        let sizeText = totalBytes > 0
+            ? ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
+            : "大小未知"
+        try await performTransfer(
+            kind: .download,
+            title: "下载 \(items.count) 项",
+            detail: "\(sizeText) · 保存到 \(directoryURL.lastPathComponent)",
+            cancellable: true,
+            outputURL: directoryURL,
+            retryRequest: nil
+        ) { updateStage in
+            updateStage(.downloading)
+            var completedCount = 0
+            var failures: [String] = []
+            for item in items {
+                try Task.checkCancellation()
+                do {
+                    try await self.svnClient.export(
+                        url: item.request.sourceURL,
+                        to: item.destinationURL,
+                        revision: item.request.revision,
+                        overwrite: item.overwrite,
+                        options: item.request.options
+                    )
+                    completedCount += 1
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    failures.append(item.request.displayName)
+                }
+            }
+            guard failures.isEmpty else {
+                throw BrowserBatchDownloadFailure(completedCount: completedCount, failures: failures)
+            }
+            updateStage(.finalizing)
+        }
+        noticeText = "已下载 \(items.count) 项 · \(directoryURL.path)"
+        onChange?()
+    }
+
     func localURLForOpening(_ row: BrowserRow) async throws -> URL {
         guard let session else { throw SVNClientError.unsupportedOperation }
         let effectiveRevision: Int?
@@ -534,23 +594,42 @@ final class BrowserViewModel {
     }
 
     func toggleFavorite(_ row: BrowserRow) async throws -> Bool {
+        let newValue = !isFavorite(row)
+        _ = try await setFavorites([row], isFavorite: newValue)
+        return newValue
+    }
+
+    @discardableResult
+    func setFavorites(_ rows: [BrowserRow], isFavorite: Bool) async throws -> Int {
         guard let session, let metadataService else { throw SVNClientError.unsupportedOperation }
-        let isFavorite = try await metadataService.toggleFavorite(
+        guard !rows.isEmpty else { return 0 }
+        let changedCount = try await metadataService.setFavorites(
             profileID: session.profileID,
-            url: row.url,
-            name: row.name,
-            kind: row.kind == .directory ? .directory : .file,
-            revision: row.revision
+            candidates: rows.map { row in
+                RepositoryFavoriteCandidate(
+                    url: row.url,
+                    name: row.name,
+                    kind: row.kind == .directory ? .directory : .file,
+                    revision: row.revision
+                )
+            },
+            isFavorite: isFavorite
         )
-        if isFavorite {
-            favoriteURLKeys.insert(row.url.absoluteString)
-        } else {
-            favoriteURLKeys.remove(row.url.absoluteString)
+        for row in rows {
+            if isFavorite {
+                favoriteURLKeys.insert(row.url.absoluteString)
+            } else {
+                favoriteURLKeys.remove(row.url.absoluteString)
+            }
         }
-        noticeText = isFavorite ? "已添加到收藏" : "已从收藏移除"
+        if changedCount > 0 {
+            noticeText = isFavorite
+                ? (changedCount == 1 ? "已添加到收藏" : "已添加 \(changedCount) 项到收藏")
+                : (changedCount == 1 ? "已从收藏移除" : "已从收藏移除 \(changedCount) 项")
+        }
         onMetadataChanged?()
         onChange?()
-        return isFavorite
+        return changedCount
     }
 
     func isFavorite(_ row: BrowserRow) -> Bool {
@@ -684,19 +763,27 @@ final class BrowserViewModel {
     }
 
     func delete(_ row: BrowserRow, message: String) async throws -> SVNWriteResult {
+        try await delete([row], message: message)
+    }
+
+    func delete(_ rows: [BrowserRow], message: String) async throws -> SVNWriteResult {
         guard let session else { throw SVNClientError.unsupportedOperation }
-        let deletedURL = itemURL(for: row)
-        let result = try await performActivity("正在删除“\(row.name)”…") {
+        guard !rows.isEmpty else { throw SVNClientError.unsupportedOperation }
+        let deletedURLs = rows.map(\.url)
+        let activity = rows.count == 1 ? "正在删除“\(rows[0].name)”…" : "正在删除 \(rows.count) 项…"
+        let result = try await performActivity(activity) {
             try await self.svnClient.delete(
-                url: self.itemURL(for: row),
+                urls: deletedURLs,
                 message: message,
                 options: session.options
             )
         }
         await invalidateDirectoryCache(profileID: session.profileID)
         try await refresh()
-        try? await metadataService?.markFavoritesUnavailable(profileID: session.profileID, atOrBelow: deletedURL)
-        showWriteSuccess("删除完成", result: result)
+        for deletedURL in deletedURLs {
+            try? await metadataService?.markFavoritesUnavailable(profileID: session.profileID, atOrBelow: deletedURL)
+        }
+        showWriteSuccess(rows.count == 1 ? "删除完成" : "已删除 \(rows.count) 项", result: result)
         onMetadataChanged?()
         return result
     }
