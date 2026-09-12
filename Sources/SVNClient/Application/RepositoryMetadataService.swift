@@ -42,6 +42,12 @@ actor RepositoryMetadataService {
         try await store.removeFavorite(id: id)
     }
 
+    func renameFavorite(id: UUID, name: String) async throws {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty else { return }
+        try await store.renameFavorite(id: id, name: normalizedName)
+    }
+
     func setFavoriteAvailability(id: UUID, isAvailable: Bool, revision: Int?) async throws {
         try await store.setFavoriteAvailability(id: id, isAvailable: isAvailable, revision: revision)
     }

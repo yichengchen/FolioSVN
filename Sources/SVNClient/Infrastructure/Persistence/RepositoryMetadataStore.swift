@@ -5,6 +5,7 @@ protocol RepositoryMetadataStoring: Sendable {
     func favorites() async throws -> [FavoriteRepositoryItem]
     func favorite(profileID: UUID, url: URL) async throws -> FavoriteRepositoryItem?
     func upsertFavorite(_ favorite: FavoriteRepositoryItem) async throws
+    func renameFavorite(id: UUID, name: String) async throws
     func removeFavorite(id: UUID) async throws
     func setFavoriteAvailability(id: UUID, isAvailable: Bool, revision: Int?) async throws
     func markFavoritesUnavailable(profileID: UUID, atOrBelow url: URL) async throws
@@ -67,6 +68,15 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
     func removeFavorite(id: UUID) throws {
         try databaseQueue.write { database in
             _ = try FavoriteRecord.deleteOne(database, key: id.uuidString)
+        }
+    }
+
+    func renameFavorite(id: UUID, name: String) throws {
+        try databaseQueue.write { database in
+            guard var record = try FavoriteRecord.fetchOne(database, key: id.uuidString) else { return }
+            record.name = name
+            record.updatedAt = .now
+            try record.update(database)
         }
     }
 
@@ -160,7 +170,6 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
                     destination: destination,
                     destinationPrefix: destinationPrefix
                 )
-                favorites[index].name = URL(string: favorites[index].url)?.lastPathComponent.removingPercentEncoding ?? favorites[index].name
                 favorites[index].updatedAt = .now
                 try favorites[index].update(database)
             }

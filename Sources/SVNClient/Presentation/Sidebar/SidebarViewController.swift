@@ -1,7 +1,7 @@
 import AppKit
 import SnapKit
 
-final class SidebarViewController: NSViewController, NSMenuItemValidation {
+final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMenuDelegate {
     var onSelectRepository: ((UUID) -> Void)?
     var onSelectDirectory: ((UUID, URL) -> Void)?
     var onLoadDirectories: ((UUID, URL) async throws -> [(name: String, url: URL)])?
@@ -9,6 +9,7 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation {
     var onEditRepository: ((UUID) -> Void)?
     var onDeleteRepository: ((UUID) -> Void)?
     var onSelectSavedItem: ((UUID, URL, String, SavedRepositoryItemKind, Int?, UUID?) -> Void)?
+    var onRenameFavorite: ((UUID, String) -> Void)?
     var onRemoveFavorite: ((UUID) -> Void)?
 
     private let stateStore: SidebarStateStore
@@ -20,6 +21,7 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation {
     private var profiles: [RepositoryProfile] = []
     private var favorites: [FavoriteRepositoryItem] = []
     private var isRestoringState = false
+    private var isSelectingContextMenuItem = false
     private var shouldActivateRestoredSelection = false
 
     init(userDefaults: UserDefaults = .standard) {
@@ -81,8 +83,10 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation {
         menu.addItem(withTitle: "编辑服务器…", action: #selector(editRepository), keyEquivalent: "")
         menu.addItem(withTitle: "移除服务器", action: #selector(deleteRepository), keyEquivalent: "")
         menu.addItem(.separator())
+        menu.addItem(withTitle: "重命名收藏…", action: #selector(renameFavorite), keyEquivalent: "")
         menu.addItem(withTitle: "从收藏移除", action: #selector(removeFavorite), keyEquivalent: "")
         for item in menu.items { item.target = self }
+        menu.delegate = self
         outlineView.menu = menu
     }
 
@@ -137,6 +141,43 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation {
         onRemoveFavorite?(favorite.id)
     }
 
+    @objc private func renameFavorite() {
+        guard let item = selectedSidebarItem,
+              case let .favorite(favorite) = item.kind else { return }
+        let alert = NSAlert()
+        alert.messageText = "重命名收藏"
+        alert.informativeText = "只修改侧边栏中的显示名称，不会重命名 SVN 中的文件或文件夹。"
+        alert.addButton(withTitle: "重命名")
+        alert.addButton(withTitle: "取消")
+
+        let field = NSTextField(string: favorite.name)
+        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        DispatchQueue.main.async { [weak alert, weak field] in
+            guard let alert, let field else { return }
+            alert.window.makeFirstResponder(field)
+            field.currentEditor()?.selectedRange = NSRange(location: 0, length: field.stringValue.utf16.count)
+        }
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != favorite.name else { return }
+        onRenameFavorite?(favorite.id, name)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === outlineView.menu,
+              let event = NSApp.currentEvent,
+              event.window === view.window else { return }
+        let point = outlineView.convert(event.locationInWindow, from: nil)
+        let clickedRow = outlineView.row(at: point)
+        guard clickedRow >= 0 else { return }
+        isSelectingContextMenuItem = true
+        outlineView.selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
+        isSelectingContextMenuItem = false
+    }
+
     private var selectedSidebarItem: SidebarItem? {
         guard outlineView.selectedRow >= 0 else { return nil }
         return outlineView.item(atRow: outlineView.selectedRow) as? SidebarItem
@@ -154,7 +195,7 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation {
         case #selector(editRepository), #selector(deleteRepository):
             if case .repository = item.kind { return true }
             return false
-        case #selector(removeFavorite):
+        case #selector(renameFavorite), #selector(removeFavorite):
             if case .favorite = item.kind { return true }
             return false
         default:
@@ -283,7 +324,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
         guard outlineView.selectedRow >= 0,
               let item = outlineView.item(atRow: outlineView.selectedRow) as? SidebarItem else { return }
         stateStore.setSelected(key: item.stateKey)
-        if isRestoringState { return }
+        if isRestoringState || isSelectingContextMenuItem { return }
         activate(item)
     }
 

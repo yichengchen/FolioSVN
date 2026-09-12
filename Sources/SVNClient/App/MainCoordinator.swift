@@ -113,6 +113,17 @@ final class MainCoordinator {
                 }
             }
         }
+        sidebarViewController.onRenameFavorite = { [weak self] favoriteID, name in
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await metadataService.renameFavorite(id: favoriteID, name: name)
+                    await reloadMetadata()
+                } catch {
+                    presentError(title: "无法重命名收藏", error: error)
+                }
+            }
+        }
         self.sidebarViewController = sidebarViewController
         self.browserViewModel = browserViewModel
         mainWindowController = windowController

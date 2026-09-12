@@ -12,6 +12,11 @@ final class RepositoryMetadataStoreTests: XCTestCase {
         let loaded = try await store.favorite(profileID: profileID, url: favorite.url)
         XCTAssertEqual(loaded, favorite)
 
+        try await store.renameFavorite(id: favorite.id, name: "常用接口说明")
+        let renamed = try await store.favorite(profileID: profileID, url: favorite.url)
+        XCTAssertEqual(renamed?.name, "常用接口说明")
+        XCTAssertEqual(renamed?.url, favorite.url)
+
         try await store.setFavoriteAvailability(id: favorite.id, isAvailable: false, revision: nil)
         let unavailableFavorites = try await store.favorites()
         XCTAssertEqual(unavailableFavorites.first?.isAvailable, false)
@@ -65,7 +70,7 @@ final class RepositoryMetadataStoreTests: XCTestCase {
         let destinationURL = rootURL.appendingPathComponent("新目录", isDirectory: true)
         let childURL = sourceURL.appendingPathComponent("说明.txt")
         let favorite = FavoriteRepositoryItem(
-            id: UUID(), profileID: profileID, url: childURL, name: "说明.txt", kind: .file,
+            id: UUID(), profileID: profileID, url: childURL, name: "常用说明", kind: .file,
             lastKnownRevision: 3, isAvailable: true, createdAt: .now, updatedAt: .now
         )
         try await store.upsertFavorite(favorite)
@@ -83,6 +88,7 @@ final class RepositoryMetadataStoreTests: XCTestCase {
             movedFavorites.first?.url,
             destinationURL.appendingPathComponent("说明.txt")
         )
+        XCTAssertEqual(movedFavorites.first?.name, "常用说明")
         let results = try await store.searchIndex(
             profileID: profileID,
             rootURL: rootURL,
