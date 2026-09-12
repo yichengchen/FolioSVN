@@ -1,9 +1,10 @@
 import AppKit
+import QuickLookUI
 import SnapKit
 import UniformTypeIdentifiers
 
 @MainActor
-final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMenuDelegate {
+final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMenuDelegate, @preconcurrency QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     var onNavigationStateChange: (() -> Void)?
 
     private let viewModel: BrowserViewModel
@@ -14,10 +15,14 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private let transferButton = NSButton(title: "传输", target: nil, action: nil)
     private let emptyStateLabel = NSTextField(wrappingLabelWithString: "")
     private let scrollView = NSScrollView()
-    private let outlineView = NSOutlineView()
+    private let outlineView = BrowserOutlineView()
     private var favoriteMenuItem: NSMenuItem?
+    private var uploadHereMenuItem: NSMenuItem?
+    private var newFolderHereMenuItem: NSMenuItem?
     private var operationTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
+    private var quickLookTask: Task<Void, Never>?
+    private var quickLookURL: URL?
     private var historyWindowController: NSWindowController?
     private var rootNodes: [BrowserTreeNode] = []
     private var expandedURLKeys: Set<String> = []
@@ -127,6 +132,8 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         outlineView.setDraggingSourceOperationMask(.copy, forLocal: false)
         outlineView.doubleAction = #selector(openSelectedItem)
         outlineView.target = self
+        outlineView.onSpaceKey = { [weak self] in self?.toggleQuickLook() }
+        outlineView.onReturnKey = { [weak self] in self?.renameSelectedItem() }
         scrollView.documentView = outlineView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
@@ -138,6 +145,10 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         menu.addItem(withTitle: "打开", action: #selector(openSelectedItem), keyEquivalent: "")
         menu.addItem(withTitle: "下载…", action: #selector(downloadSelectedItem), keyEquivalent: "")
         menu.addItem(withTitle: "替换…", action: #selector(replaceSelectedItem), keyEquivalent: "")
+        let uploadHere = menu.addItem(withTitle: "上传到这里…", action: #selector(uploadToSelectedFolder), keyEquivalent: "")
+        uploadHereMenuItem = uploadHere
+        let newFolderHere = menu.addItem(withTitle: "在这里新建文件夹…", action: #selector(createFolderInSelectedFolder), keyEquivalent: "")
+        newFolderHereMenuItem = newFolderHere
         let favoriteItem = menu.addItem(withTitle: "添加到收藏", action: #selector(toggleFavoriteForSelectedItem), keyEquivalent: "")
         favoriteMenuItem = favoriteItem
         menu.addItem(.separator())
@@ -165,6 +176,8 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         }
         guard let row = selectedRow else { return }
         favoriteMenuItem?.title = viewModel.isFavorite(row) ? "从收藏移除" : "添加到收藏"
+        uploadHereMenuItem?.isHidden = row.kind != .directory
+        newFolderHereMenuItem?.isHidden = row.kind != .directory
     }
 
     private func configureLayout() {
@@ -503,6 +516,62 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         }
     }
 
+    @objc private func toggleQuickLook() {
+        guard let panel = QLPreviewPanel.shared() else { return }
+        if panel.isVisible {
+            panel.orderOut(nil)
+            quickLookTask?.cancel()
+            quickLookTask = nil
+            quickLookURL = nil
+            return
+        }
+        showQuickLookForSelection(in: panel)
+    }
+
+    private func showQuickLookForSelection(in panel: QLPreviewPanel? = QLPreviewPanel.shared()) {
+        let previousTask = quickLookTask
+        previousTask?.cancel()
+        guard let panel, let row = selectedRow, row.kind == .file else {
+            quickLookURL = nil
+            panel?.reloadData()
+            return
+        }
+        quickLookTask = Task { @MainActor [weak self, weak panel] in
+            if let previousTask { _ = await previousTask.result }
+            guard let self, let panel else { return }
+            guard !viewModel.isBusy else {
+                NSSound.beep()
+                return
+            }
+            do {
+                let localURL = try await viewModel.localURLForOpening(row)
+                try Task.checkCancellation()
+                guard selectedRow?.url == row.url else { return }
+                quickLookURL = localURL
+                panel.dataSource = self
+                panel.delegate = self
+                panel.reloadData()
+                panel.makeKeyAndOrderFront(self)
+            } catch is CancellationError {
+                // Moving the selection while Quick Look downloads a file supersedes the preview.
+            } catch {
+                presentError(message: error.localizedDescription)
+            }
+        }
+    }
+
+    @objc private func refreshRepositoryFromMenu() {
+        refreshRepository()
+    }
+
+    @objc private func createFolderFromMenu() {
+        createFolder()
+    }
+
+    @objc private func uploadFilesFromMenu() {
+        uploadFiles()
+    }
+
     @objc private func downloadSelectedItem() {
         guard let row = selectedRow else { return }
         let panel = NSSavePanel()
@@ -515,16 +584,21 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         run { try await self.viewModel.download(row, to: resolved.url, overwrite: resolved.overwrite) }
     }
 
-    private func chooseFilesForUpload() {
+    private func chooseFilesForUpload(targetDirectory: BrowserTreeNode? = nil) {
         guard canModifyRepository else { return }
         let panel = NSOpenPanel()
-        panel.title = "选择要上传的文件"
+        panel.title = targetDirectory.map { "选择要上传到“\($0.row.name)”的文件" } ?? "选择要上传的文件"
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
 
-        handleFilesForUpload(panel.urls)
+        handleFilesForUpload(panel.urls, targetDirectory: targetDirectory)
+    }
+
+    @objc private func uploadToSelectedFolder() {
+        guard let node = selectedNode, node.row.kind == .directory else { return }
+        chooseFilesForUpload(targetDirectory: node)
     }
 
     private func handleFilesForUpload(_ urls: [URL], targetDirectory: BrowserTreeNode? = nil) {
@@ -614,37 +688,58 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         run { _ = try await self.viewModel.replace(row, with: localURL, message: message) }
     }
 
-    private func promptForNewFolder() {
+    private func promptForNewFolder(in targetDirectory: BrowserTreeNode? = nil) {
         guard canModifyRepository else { return }
+        let destinationName = targetDirectory?.row.name ?? "当前文件夹"
         guard let name = prompt(
             title: "新建文件夹",
-            message: "在当前目录创建一个新文件夹。",
+            message: "在“\(destinationName)”中创建一个新文件夹。",
             fieldLabel: "文件夹名称",
             initialValue: "新建文件夹",
             confirmTitle: "创建"
         ), validateName(name) else { return }
-        guard let node = selectedNode,
-              !siblingRows(for: node).contains(where: { $0.name == name }) else {
+        let existingRows = targetDirectory?.children?.map(\.row) ?? (targetDirectory == nil ? viewModel.rows : [])
+        guard !existingRows.contains(where: { $0.name == name }) else {
             presentError(message: "当前文件夹已存在同名项目。")
             return
         }
-        run { _ = try await self.viewModel.createDirectory(name: name, message: "新建文件夹：\(name)") }
+        run {
+            _ = try await self.viewModel.createDirectory(
+                name: name,
+                in: targetDirectory?.row.url,
+                message: "新建文件夹：\(name)"
+            )
+        }
+    }
+
+    @objc private func createFolderInSelectedFolder() {
+        guard let node = selectedNode, node.row.kind == .directory else { return }
+        promptForNewFolder(in: node)
     }
 
     @objc private func renameSelectedItem() {
-        guard let row = selectedRow else { return }
+        guard let node = selectedNode else { return }
+        let row = node.row
         guard let name = prompt(
             title: "重命名“\(row.name)”",
             message: "重命名会保留原路径的版本历史。",
             fieldLabel: "新名称",
             initialValue: row.name,
-            confirmTitle: "重命名"
+            confirmTitle: "重命名",
+            selectionRange: renameSelectionRange(for: row)
         ), name != row.name, validateName(name) else { return }
-        guard !viewModel.rows.contains(where: { $0.name == name }) else {
+        guard !siblingRows(for: node).contains(where: { $0.name == name }) else {
             presentError(message: "当前文件夹已存在同名项目。")
             return
         }
         run { _ = try await self.viewModel.rename(row, to: name, message: "重命名：\(row.name) → \(name)") }
+    }
+
+    private func renameSelectionRange(for row: BrowserRow) -> NSRange {
+        guard row.kind == .file else { return NSRange(location: 0, length: row.name.utf16.count) }
+        let extensionName = (row.name as NSString).pathExtension
+        let suffixLength = extensionName.isEmpty ? 0 : extensionName.utf16.count + 1
+        return NSRange(location: 0, length: max(0, row.name.utf16.count - suffixLength))
     }
 
     private func siblingRows(for target: BrowserTreeNode) -> [BrowserRow] {
@@ -864,7 +959,8 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         fieldLabel: String,
         initialValue: String,
         confirmTitle: String,
-        destructive: Bool = false
+        destructive: Bool = false,
+        selectionRange: NSRange? = nil
     ) -> String? {
         let alert = NSAlert()
         alert.messageText = title
@@ -881,6 +977,15 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         label.snp.makeConstraints { $0.top.leading.trailing.equalToSuperview() }
         field.snp.makeConstraints { $0.top.equalTo(label.snp.bottom).offset(6); $0.leading.trailing.equalToSuperview(); $0.height.equalTo(24) }
         alert.accessoryView = container
+
+        alert.window.initialFirstResponder = field
+        if let selectionRange {
+            DispatchQueue.main.async { [weak alert, weak field] in
+                guard let alert, let field else { return }
+                alert.window.makeFirstResponder(field)
+                field.currentEditor()?.selectedRange = selectionRange
+            }
+        }
 
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }
         let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -915,6 +1020,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     @objc private func cancelCurrentActivity() {
         operationTask?.cancel()
         searchTask?.cancel()
+        quickLookTask?.cancel()
     }
 
     @objc private func showTransferTasks() {
@@ -930,12 +1036,15 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
                     action: nil,
                     keyEquivalent: ""
                 )
-                item.subtitle = transfer.statusDetail
+                let startTime = transfer.startedAt.formatted(date: .omitted, time: .shortened)
+                item.subtitle = "\(transfer.detail) · \(startTime)"
                 item.image = NSImage(
                     systemSymbolName: transferSymbolName(transfer),
                     accessibilityDescription: transfer.stateText
                 )
-                item.isEnabled = false
+                let actions = transferActionsMenu(for: transfer)
+                item.submenu = actions.items.isEmpty ? nil : actions
+                item.isEnabled = item.submenu != nil
                 menu.addItem(item)
             }
         }
@@ -960,6 +1069,86 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: transferButton.bounds.maxY + 4), in: transferButton)
     }
 
+    private func transferActionsMenu(for transfer: BrowserTransfer) -> NSMenu {
+        let menu = NSMenu(title: transfer.title)
+        let identifier = transfer.id as NSUUID
+        if case .completed = transfer.state,
+           let outputURL = transfer.outputURL,
+           FileManager.default.fileExists(atPath: outputURL.path) {
+            let reveal = menu.addItem(
+                withTitle: "在 Finder 中显示",
+                action: #selector(revealTransferOutput(_:)),
+                keyEquivalent: ""
+            )
+            reveal.target = self
+            reveal.representedObject = identifier
+            let open = menu.addItem(
+                withTitle: "打开文件",
+                action: #selector(openTransferOutput(_:)),
+                keyEquivalent: ""
+            )
+            open.target = self
+            open.representedObject = identifier
+        }
+        if transfer.canRetry {
+            let retry = menu.addItem(
+                withTitle: "重试下载",
+                action: #selector(retryTransfer(_:)),
+                keyEquivalent: ""
+            )
+            retry.target = self
+            retry.representedObject = identifier
+        }
+        if case .failed = transfer.state {
+            let details = menu.addItem(
+                withTitle: "查看错误详情",
+                action: #selector(showTransferError(_:)),
+                keyEquivalent: ""
+            )
+            details.target = self
+            details.representedObject = identifier
+            if transfer.retryRequest == nil {
+                let hint = NSMenuItem(title: "写入任务失败后请先刷新仓库确认状态", action: nil, keyEquivalent: "")
+                hint.isEnabled = false
+                menu.addItem(hint)
+            }
+        }
+        return menu
+    }
+
+    @objc private func revealTransferOutput(_ sender: NSMenuItem) {
+        guard let transfer = transfer(from: sender), let outputURL = transfer.outputURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+    }
+
+    @objc private func openTransferOutput(_ sender: NSMenuItem) {
+        guard let transfer = transfer(from: sender), let outputURL = transfer.outputURL else { return }
+        guard NSWorkspace.shared.open(outputURL) else {
+            presentError(message: "没有找到可打开“\(outputURL.lastPathComponent)”的应用。")
+            return
+        }
+    }
+
+    @objc private func retryTransfer(_ sender: NSMenuItem) {
+        guard let transfer = transfer(from: sender) else { return }
+        run { try await self.viewModel.retryTransfer(id: transfer.id) }
+    }
+
+    @objc private func showTransferError(_ sender: NSMenuItem) {
+        guard let transfer = transfer(from: sender), case let .failed(message) = transfer.state else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = transfer.title
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        alert.runModal()
+    }
+
+    private func transfer(from sender: NSMenuItem) -> BrowserTransfer? {
+        guard let identifier = sender.representedObject as? NSUUID else { return nil }
+        return viewModel.transfers.first { $0.id == identifier as UUID }
+    }
+
     @objc private func clearFinishedTransfers() {
         viewModel.clearFinishedTransfers()
     }
@@ -982,6 +1171,16 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(refreshRepositoryFromMenu):
+            return hasRepositoryConnection && !viewModel.isBusy
+        case #selector(createFolderFromMenu), #selector(uploadFilesFromMenu):
+            return canModifyRepository
+        case #selector(toggleQuickLook):
+            return selectedRow?.kind == .file && !viewModel.isBusy
+        default:
+            break
+        }
         guard let row = selectedRow, !viewModel.isBusy else { return false }
         if viewModel.isShowingSearchResults {
             switch menuItem.action {
@@ -997,7 +1196,21 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         if menuItem.action == #selector(showSelectedItemHistory) {
             return row.kind == .file
         }
+        if menuItem.action == #selector(uploadToSelectedFolder)
+            || menuItem.action == #selector(createFolderInSelectedFolder) {
+            return row.kind == .directory && canModifyRepository
+        }
         return true
+    }
+}
+
+extension BrowserViewController {
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        quickLookURL == nil ? 0 : 1
+    }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
+        quickLookURL as NSURL?
     }
 }
 
@@ -1082,6 +1295,11 @@ extension BrowserViewController: NSOutlineViewDataSource {
 }
 
 extension BrowserViewController: NSOutlineViewDelegate {
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        guard let panel = QLPreviewPanel.shared(), panel.isVisible else { return }
+        showQuickLookForSelection(in: panel)
+    }
+
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let tableColumn else { return nil }
         if let placeholder = item as? BrowserTreePlaceholder {
@@ -1192,6 +1410,25 @@ private final class BrowserTreePlaceholder: NSObject {
 
     init(message: String) {
         self.message = message
+    }
+}
+
+@MainActor
+private final class BrowserOutlineView: NSOutlineView {
+    var onSpaceKey: (() -> Void)?
+    var onReturnKey: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 49, modifiers.isEmpty {
+            onSpaceKey?()
+            return
+        }
+        if (event.keyCode == 36 || event.keyCode == 76), modifiers.isEmpty {
+            onReturnKey?()
+            return
+        }
+        super.keyDown(with: event)
     }
 }
 

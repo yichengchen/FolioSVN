@@ -8,11 +8,19 @@ struct RepositorySession: Sendable {
     let options: SVNRequestOptions
 }
 
-struct BrowserDownloadRequest: Sendable {
+struct BrowserDownloadRequest: Equatable, Sendable {
     let sourceURL: URL
     let displayName: String
     let byteSize: Int64?
     let revision: Int?
+    let options: SVNRequestOptions
+}
+
+struct BrowserHistoricalDownloadRequest: Equatable, Sendable {
+    let sourceURL: URL
+    let displayName: String
+    let pegRevision: Int
+    let revision: Int
     let options: SVNRequestOptions
 }
 
@@ -40,17 +48,45 @@ struct BrowserTransfer: Identifiable, Equatable, Sendable {
         case failed(String)
     }
 
+    enum Stage: Equatable, Sendable {
+        case queued
+        case preparing
+        case downloading
+        case uploadingAndCommitting
+        case checkingAndCommitting
+        case finalizing
+
+        var text: String {
+            switch self {
+            case .queued: return "等待开始"
+            case .preparing: return "正在准备"
+            case .downloading: return "正在下载"
+            case .uploadingAndCommitting: return "正在上传并提交"
+            case .checkingAndCommitting: return "正在检查远端并提交"
+            case .finalizing: return "正在完成"
+            }
+        }
+    }
+
+    enum RetryRequest: Equatable, Sendable {
+        case download(BrowserDownloadRequest, destinationURL: URL, overwrite: Bool)
+        case historicalDownload(BrowserHistoricalDownloadRequest, destinationURL: URL, overwrite: Bool)
+    }
+
     let id: UUID
     let kind: Kind
     let title: String
     let detail: String
     var state: State
+    var stage: Stage
+    let outputURL: URL?
+    let retryRequest: RetryRequest?
     let startedAt: Date
     var finishedAt: Date?
 
     var stateText: String {
         switch state {
-        case .running: return "进行中"
+        case .running: return stage.text
         case .completed: return "已完成"
         case .cancelled: return "已取消"
         case .failed: return "失败"
@@ -62,6 +98,12 @@ struct BrowserTransfer: Identifiable, Equatable, Sendable {
             return "\(detail) · \(message)"
         }
         return detail
+    }
+
+    var canRetry: Bool {
+        guard retryRequest != nil else { return false }
+        if case .failed = state { return true }
+        return false
     }
 }
 
@@ -302,8 +344,11 @@ final class BrowserViewModel {
             kind: .download,
             title: "下载 \(request.displayName)",
             detail: "\(sizeText) · 保存为 \(destinationURL.lastPathComponent)",
-            cancellable: true
-        ) {
+            cancellable: true,
+            outputURL: destinationURL,
+            retryRequest: .download(request, destinationURL: destinationURL, overwrite: overwrite)
+        ) { updateStage in
+            updateStage(.downloading)
             try await self.svnClient.export(
                 url: request.sourceURL,
                 to: destinationURL,
@@ -311,6 +356,7 @@ final class BrowserViewModel {
                 overwrite: overwrite,
                 options: request.options
             )
+            updateStage(.finalizing)
         }
         noticeText = "下载完成 · \(destinationURL.path)"
         onChange?()
@@ -382,22 +428,44 @@ final class BrowserViewModel {
         guard history.entries.contains(where: { $0.revision == revision }) else {
             throw SVNClientError.unsupportedOperation
         }
-        try await performTransfer(
-            kind: .download,
-            title: "下载 \(history.displayName) 的 r\(revision)",
-            detail: "历史版本 · 保存为 \(destinationURL.lastPathComponent)",
-            cancellable: true
-        ) {
-            try await self.svnClient.exportHistoricalVersion(
-                url: history.sourceURL,
+        try await downloadHistoricalVersion(
+            BrowserHistoricalDownloadRequest(
+                sourceURL: history.sourceURL,
+                displayName: history.displayName,
                 pegRevision: history.pegRevision,
                 revision: revision,
+                options: history.options
+            ),
+            to: destinationURL,
+            overwrite: overwrite
+        )
+    }
+
+    private func downloadHistoricalVersion(
+        _ request: BrowserHistoricalDownloadRequest,
+        to destinationURL: URL,
+        overwrite: Bool
+    ) async throws {
+        try await performTransfer(
+            kind: .download,
+            title: "下载 \(request.displayName) 的 r\(request.revision)",
+            detail: "历史版本 · 保存为 \(destinationURL.lastPathComponent)",
+            cancellable: true,
+            outputURL: destinationURL,
+            retryRequest: .historicalDownload(request, destinationURL: destinationURL, overwrite: overwrite)
+        ) { updateStage in
+            updateStage(.downloading)
+            try await self.svnClient.exportHistoricalVersion(
+                url: request.sourceURL,
+                pegRevision: request.pegRevision,
+                revision: request.revision,
                 to: destinationURL,
                 overwrite: overwrite,
-                options: history.options
+                options: request.options
             )
+            updateStage(.finalizing)
         }
-        noticeText = "历史版本 r\(revision) 下载完成 · \(destinationURL.path)"
+        noticeText = "历史版本 r\(request.revision) 下载完成 · \(destinationURL.path)"
         onChange?()
     }
 
@@ -435,8 +503,11 @@ final class BrowserViewModel {
             kind: .replace,
             title: "恢复 \(history.displayName) 至 r\(revision)",
             detail: "基于当前 r\(history.currentRevision) 创建新版本",
-            cancellable: false
-        ) {
+            cancellable: false,
+            outputURL: nil,
+            retryRequest: nil
+        ) { updateStage in
+            updateStage(.downloading)
             try await self.svnClient.exportHistoricalVersion(
                 url: history.sourceURL,
                 pegRevision: history.pegRevision,
@@ -445,6 +516,7 @@ final class BrowserViewModel {
                 overwrite: false,
                 options: history.options
             )
+            updateStage(.checkingAndCommitting)
             return try await self.svnClient.replace(
                 localFileURL: historicalFileURL,
                 targetURL: history.sourceURL,
@@ -573,11 +645,12 @@ final class BrowserViewModel {
         onChange?()
     }
 
-    func createDirectory(name: String, message: String) async throws -> SVNWriteResult {
+    func createDirectory(name: String, in directoryURL: URL? = nil, message: String) async throws -> SVNWriteResult {
         guard let session, let currentURL else { throw SVNClientError.unsupportedOperation }
+        let targetDirectoryURL = directoryURL ?? currentURL
         let result = try await performActivity("正在新建文件夹…") {
             try await self.svnClient.makeDirectory(
-                url: currentURL.appendingPathComponent(name, isDirectory: true),
+                url: targetDirectoryURL.appendingPathComponent(name, isDirectory: true),
                 message: message,
                 options: session.options
             )
@@ -648,9 +721,12 @@ final class BrowserViewModel {
             kind: .upload,
             title: "上传 \(files.count) 个文件",
             detail: ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file),
-            cancellable: false
-        ) {
-            try await self.svnClient.upload(
+            cancellable: false,
+            outputURL: nil,
+            retryRequest: nil
+        ) { updateStage in
+            updateStage(.uploadingAndCommitting)
+            return try await self.svnClient.upload(
                 files: files,
                 to: targetDirectoryURL,
                 message: message,
@@ -671,9 +747,12 @@ final class BrowserViewModel {
             kind: .replace,
             title: "替换 \(row.name)",
             detail: localSize,
-            cancellable: false
-        ) {
-            try await self.svnClient.replace(
+            cancellable: false,
+            outputURL: nil,
+            retryRequest: nil
+        ) { updateStage in
+            updateStage(.checkingAndCommitting)
+            return try await self.svnClient.replace(
                 localFileURL: localFileURL,
                 targetURL: self.itemURL(for: row),
                 expectedRevision: revision,
@@ -805,7 +884,9 @@ final class BrowserViewModel {
         title: String,
         detail: String,
         cancellable: Bool,
-        operation: () async throws -> Result
+        outputURL: URL?,
+        retryRequest: BrowserTransfer.RetryRequest?,
+        operation: @MainActor (_ updateStage: @MainActor (BrowserTransfer.Stage) -> Void) async throws -> Result
     ) async throws -> Result {
         let id = UUID()
         transfers.insert(
@@ -815,6 +896,9 @@ final class BrowserViewModel {
                 title: title,
                 detail: detail,
                 state: .running,
+                stage: .preparing,
+                outputURL: outputURL,
+                retryRequest: retryRequest,
                 startedAt: .now,
                 finishedAt: nil
             ),
@@ -825,9 +909,12 @@ final class BrowserViewModel {
         do {
             let result = try await performActivity(
                 "正在\(title)…",
-                cancellable: cancellable,
-                operation: operation
-            )
+                cancellable: cancellable
+            ) {
+                try await operation { [weak self] stage in
+                    self?.updateTransferStage(id: id, stage: stage)
+                }
+            }
             finishTransfer(id: id, state: .completed)
             return result
         } catch is CancellationError {
@@ -841,6 +928,27 @@ final class BrowserViewModel {
 
     func clearFinishedTransfers() {
         transfers.removeAll { $0.state != .running }
+        onChange?()
+    }
+
+    func retryTransfer(id: UUID) async throws {
+        guard let retryRequest = transfers.first(where: { $0.id == id && $0.canRetry })?.retryRequest else {
+            throw SVNClientError.unsupportedOperation
+        }
+        switch retryRequest {
+        case let .download(request, destinationURL, overwrite):
+            try await download(request, to: destinationURL, overwrite: overwrite)
+        case let .historicalDownload(request, destinationURL, overwrite):
+            try await downloadHistoricalVersion(request, to: destinationURL, overwrite: overwrite)
+        }
+    }
+
+    private func updateTransferStage(id: UUID, stage: BrowserTransfer.Stage) {
+        guard let index = transfers.firstIndex(where: { $0.id == id }), transfers[index].state == .running else {
+            return
+        }
+        transfers[index].stage = stage
+        activityText = "\(transfers[index].title) · \(stage.text)"
         onChange?()
     }
 

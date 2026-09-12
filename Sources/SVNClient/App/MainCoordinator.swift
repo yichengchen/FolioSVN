@@ -9,6 +9,10 @@ final class MainCoordinator {
     private weak var sidebarViewController: SidebarViewController?
     private weak var browserViewModel: BrowserViewModel?
 
+    var activeTransferCount: Int {
+        browserViewModel?.activeTransferCount ?? 0
+    }
+
     init(
         svnClient: any SVNClient,
         profileService: RepositoryProfileService,

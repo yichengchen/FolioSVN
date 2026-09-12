@@ -273,6 +273,9 @@ final class BrowserViewModelTests: XCTestCase {
         _ = try await viewModel.upload(files: [localFile], to: directory.url, message: "上传")
         let uploadDirectory = await client.lastUploadDirectory
         XCTAssertEqual(uploadDirectory, directory.url)
+        _ = try await viewModel.createDirectory(name: "子目录", in: directory.url, message: "新建")
+        let createdDirectoryURL = await client.lastCreatedDirectoryURL
+        XCTAssertEqual(createdDirectoryURL, directory.url.appendingPathComponent("子目录", isDirectory: true))
         XCTAssertGreaterThan(viewModel.directoryTreeGeneration, 0)
     }
 
@@ -290,6 +293,8 @@ final class BrowserViewModelTests: XCTestCase {
         let transfer = try XCTUnwrap(viewModel.transfers.first)
         XCTAssertEqual(transfer.title, "下载 说明.txt")
         XCTAssertEqual(transfer.state, .completed)
+        XCTAssertEqual(transfer.stage, .finalizing)
+        XCTAssertEqual(transfer.outputURL, destination)
         XCTAssertEqual(viewModel.activeTransferCount, 0)
         viewModel.clearFinishedTransfers()
         XCTAssertTrue(viewModel.transfers.isEmpty)
@@ -308,6 +313,8 @@ final class BrowserViewModelTests: XCTestCase {
         }
         while viewModel.activeTransferCount == 0 { await Task.yield() }
 
+        XCTAssertEqual(viewModel.transfers.first?.stage, .downloading)
+
         task.cancel()
         do {
             try await task.value
@@ -318,6 +325,34 @@ final class BrowserViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.transfers.first?.state, .cancelled)
         XCTAssertEqual(viewModel.activeTransferCount, 0)
+    }
+
+    func testFailedDownloadCanBeRetriedWithOriginalRequestAndDestination() async throws {
+        let client = RetryDownloadSVNClient()
+        let viewModel = BrowserViewModel(svnClient: client)
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        try await viewModel.connect(to: rootURL)
+        let row = try XCTUnwrap(viewModel.rows.first)
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("retry-transfer-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: destination) }
+
+        do {
+            try await viewModel.download(row, to: destination, overwrite: false)
+            XCTFail("Expected first download to fail")
+        } catch {
+            // The failed task remains available in transfer history.
+        }
+
+        let failedTransfer = try XCTUnwrap(viewModel.transfers.first)
+        XCTAssertTrue(failedTransfer.canRetry)
+        XCTAssertEqual(failedTransfer.outputURL, destination)
+        try await viewModel.retryTransfer(id: failedTransfer.id)
+
+        XCTAssertEqual(viewModel.transfers.first?.state, .completed)
+        let exportCount = await client.exportCount
+        XCTAssertEqual(exportCount, 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
     }
 
     func testHistoricalDownloadAndRestoreUsePegAndCurrentRevisionSnapshot() async throws {
@@ -536,6 +571,28 @@ private actor CancellableTransferSVNClient: SVNClient {
     }
 }
 
+private actor RetryDownloadSVNClient: SVNClient {
+    private(set) var exportCount = 0
+
+    func version() async throws -> String { "1.14.5" }
+
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        [SVNListEntry(name: "重试.txt", kind: .file, size: 8, revision: 3, author: nil, updatedAt: nil)]
+    }
+
+    func export(
+        url: URL,
+        to destinationURL: URL,
+        revision: Int?,
+        overwrite: Bool,
+        options: SVNRequestOptions
+    ) async throws {
+        exportCount += 1
+        if exportCount == 1 { throw SVNClientError.invalidListXML }
+        try Data("已完成".utf8).write(to: destinationURL)
+    }
+}
+
 private actor HistorySVNClient: SVNClient {
     struct HistoricalExport: Sendable {
         let pegRevision: Int
@@ -612,6 +669,7 @@ private actor TreeOperationsSVNClient: SVNClient {
     private var listCounts: [String: Int] = [:]
     private(set) var lastMove: Move?
     private(set) var lastUploadDirectory: URL?
+    private(set) var lastCreatedDirectoryURL: URL?
 
     func version() async throws -> String { "1.14.5" }
 
@@ -651,5 +709,10 @@ private actor TreeOperationsSVNClient: SVNClient {
     ) async throws -> SVNWriteResult {
         lastUploadDirectory = directoryURL
         return SVNWriteResult(revision: 4)
+    }
+
+    func makeDirectory(url: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
+        lastCreatedDirectoryURL = url
+        return SVNWriteResult(revision: 5)
     }
 }
