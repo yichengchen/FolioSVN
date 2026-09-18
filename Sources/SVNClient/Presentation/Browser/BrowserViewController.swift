@@ -34,6 +34,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private var filePromiseTasks: [UUID: Task<Void, Never>] = [:]
     private var lastFilePromiseTask: Task<Void, Never>?
     private var historyWindowController: NSWindowController?
+    private var wordDiffWindowController: WordDiffWindowController?
     private var rootNodes: [BrowserTreeNode] = []
     private var expandedURLKeys: Set<String> = []
     private var childLoadTasks: [String: Task<Void, Never>] = [:]
@@ -974,13 +975,13 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private func presentHistory(_ history: BrowserFileHistory) {
         let controller = FileHistoryViewController(history: history)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 460),
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 460),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "\(history.displayName) — 历史版本"
-        window.minSize = NSSize(width: 620, height: 340)
+        window.minSize = NSSize(width: 900, height: 340)
         window.contentViewController = controller
         let windowController = NSWindowController(window: window)
         historyWindowController?.close()
@@ -1004,6 +1005,39 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         }
         controller.onRestore = { [weak self] entry in
             self?.confirmRestore(history, entry: entry)
+        }
+        controller.onCompare = { [weak self, weak controller] originalRevision, revisedRevision in
+            guard let self, !self.viewModel.isBusy else { return }
+            controller?.setComparing(true)
+            self.run { [weak controller] in
+                defer { controller?.setComparing(false) }
+                let original = try await self.viewModel.localURLForOpening(history: history, revision: originalRevision)
+                let revised = try await self.viewModel.localURLForOpening(history: history, revision: revisedRevision)
+                let result = try await WordDiffService().compare(original: original, revised: revised)
+                self.wordDiffWindowController?.close()
+                self.wordDiffWindowController = WordDiffWindowController(result: result,
+                    title: "\(history.displayName) · r\(originalRevision) → r\(revisedRevision)")
+                self.wordDiffWindowController?.showWindow(self)
+            }
+        }
+        controller.onCompareExternal = { [weak self, weak controller] entry in
+            guard let self, !self.viewModel.isBusy else { return }
+            let panel = NSOpenPanel()
+            panel.title = "选择与 r\(entry.revision) 比较的 Word 文件"
+            panel.allowedContentTypes = [UTType(filenameExtension: "docx")!]
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false
+            guard panel.runModal() == .OK, let fileURL = panel.url else { return }
+            controller?.setComparing(true)
+            self.run { [weak controller] in
+                defer { controller?.setComparing(false) }
+                let original = try await self.viewModel.localURLForOpening(history: history, revision: entry.revision)
+                let result = try await WordDiffService().compare(original: original, revised: fileURL)
+                self.wordDiffWindowController?.close()
+                self.wordDiffWindowController = WordDiffWindowController(result: result,
+                    title: "\(history.displayName) r\(entry.revision) → 本地 \(fileURL.lastPathComponent)")
+                self.wordDiffWindowController?.showWindow(self)
+            }
         }
         controller.onClose = { [weak self] in
             self?.historyWindowController = nil

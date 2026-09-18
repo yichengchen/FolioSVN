@@ -6,6 +6,8 @@ final class FileHistoryViewController: NSViewController, NSTableViewDataSource, 
     var onDownload: ((SVNLogEntry) -> Void)?
     var onOpen: ((SVNLogEntry) -> Void)?
     var onRestore: ((SVNLogEntry) -> Void)?
+    var onCompare: ((Int, Int) -> Void)?
+    var onCompareExternal: ((SVNLogEntry) -> Void)?
     var onClose: (() -> Void)?
 
     private let history: BrowserFileHistory
@@ -13,6 +15,15 @@ final class FileHistoryViewController: NSViewController, NSTableViewDataSource, 
     private let downloadButton = NSButton(title: "下载…", target: nil, action: nil)
     private let openButton = NSButton(title: "打开", target: nil, action: nil)
     private let restoreButton = NSButton(title: "恢复此版本…", target: nil, action: nil)
+    private let compareButton = NSButton(title: "比较 Word 版本", target: nil, action: nil)
+    private let externalCompareButton = NSButton(title: "与本地文件比较…", target: nil, action: nil)
+    private var isComparing = false
+
+    func setComparing(_ value: Bool) {
+        isComparing = value
+        compareButton.title = value ? "正在比较…" : "比较 Word 版本"
+        updateButtons()
+    }
 
     init(history: BrowserFileHistory) {
         self.history = history
@@ -51,6 +62,12 @@ final class FileHistoryViewController: NSViewController, NSTableViewDataSource, 
         restoreButton.target = self
         restoreButton.action = #selector(restoreSelected)
         restoreButton.hasDestructiveAction = true
+        compareButton.target = self
+        compareButton.action = #selector(compareSelected)
+        compareButton.isHidden = history.sourceURL.pathExtension.lowercased() != "docx"
+        externalCompareButton.isHidden = compareButton.isHidden
+        externalCompareButton.target = self
+        externalCompareButton.action = #selector(compareExternalSelected)
     }
 
     private func configureTable() {
@@ -71,7 +88,7 @@ final class FileHistoryViewController: NSViewController, NSTableViewDataSource, 
         tableView.dataSource = self
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.rowSizeStyle = .medium
-        tableView.allowsMultipleSelection = false
+        tableView.allowsMultipleSelection = true
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         tableView.target = self
         tableView.doubleAction = #selector(openSelected)
@@ -80,7 +97,7 @@ final class FileHistoryViewController: NSViewController, NSTableViewDataSource, 
     private func configureLayout() {
         let title = NSTextField(labelWithString: "“\(history.displayName)”的历史版本")
         title.font = .systemFont(ofSize: 18, weight: .semibold)
-        let subtitle = NSTextField(labelWithString: "当前版本 r\(history.currentRevision) · 最多显示 \(history.entries.count) 条记录")
+        let subtitle = NSTextField(labelWithString: "当前版本 r\(history.currentRevision) · \(history.entries.count) 条记录 · DOCX 可按 ⌘ 选择两个版本比较")
         subtitle.textColor = .secondaryLabelColor
 
         let scrollView = NSScrollView()
@@ -90,7 +107,7 @@ final class FileHistoryViewController: NSViewController, NSTableViewDataSource, 
         scrollView.borderType = .bezelBorder
 
         let closeButton = NSButton(title: "关闭", target: self, action: #selector(closeWindow))
-        let footer = NSStackView(views: [restoreButton, NSView(), downloadButton, openButton, closeButton])
+        let footer = NSStackView(views: [restoreButton, compareButton, externalCompareButton, NSView(), downloadButton, openButton, closeButton])
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 8
@@ -156,15 +173,32 @@ final class FileHistoryViewController: NSViewController, NSTableViewDataSource, 
     }
 
     private var selectedEntry: SVNLogEntry? {
+        guard tableView.selectedRowIndexes.count == 1 else { return nil }
         guard history.entries.indices.contains(tableView.selectedRow) else { return nil }
         return history.entries[tableView.selectedRow]
     }
 
     private func updateButtons() {
         let entry = selectedEntry
-        downloadButton.isEnabled = entry != nil
-        openButton.isEnabled = entry != nil
-        restoreButton.isEnabled = entry.map { $0.revision != history.currentRevision } ?? false
+        downloadButton.isEnabled = entry != nil && !isComparing
+        openButton.isEnabled = entry != nil && !isComparing
+        restoreButton.isEnabled = !isComparing && (entry.map { $0.revision != history.currentRevision } ?? false)
+        compareButton.isEnabled = !isComparing && tableView.selectedRowIndexes.count == 2
+        externalCompareButton.isEnabled = !isComparing && entry != nil
+    }
+
+    @objc private func compareExternalSelected() {
+        guard !isComparing, let selectedEntry else { return }
+        onCompareExternal?(selectedEntry)
+    }
+
+    @objc private func compareSelected() {
+        guard !isComparing, tableView.selectedRowIndexes.count == 2 else { return }
+        let revisions = tableView.selectedRowIndexes.compactMap {
+            history.entries.indices.contains($0) ? history.entries[$0].revision : nil
+        }.sorted()
+        guard revisions.count == 2 else { return }
+        onCompare?(revisions[0], revisions[1])
     }
 
     @objc private func downloadSelected() {

@@ -52,9 +52,27 @@ targets:
             fi
             codesign --force $SIGN_OPTIONS --sign "$SIGN_IDENTITY" "$RUNTIME_DIR/bin/svn"
           fi
+      - name: Sign bundled Word diff runtime
+        basedOnDependencyAnalysis: false
+        script: |
+          RUNTIME_DIR="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/WordDiffRuntime"
+          if [ ! -x "$RUNTIME_DIR/worddiff-demo" ]; then
+            echo "error: Run Scripts/package-worddiff-runtime.sh before building."
+            exit 1
+          fi
+          if [ "$CODE_SIGNING_ALLOWED" != "NO" ]; then
+            SIGN_IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
+            find "$RUNTIME_DIR" -type f -name '*.dylib' -print0 | while IFS= read -r -d '' LIBRARY; do
+              codesign --force --options runtime --sign "$SIGN_IDENTITY" "$LIBRARY"
+            done
+            codesign --force --options runtime --entitlements "$SRCROOT/Tools/WordDiffDemo/runtime.entitlements" --sign "$SIGN_IDENTITY" "$RUNTIME_DIR/worddiff-demo"
+          fi
     sources:
       - path: Sources/SVNClient
       - path: Vendor/SVNRuntime
+        type: folder
+        buildPhase: resources
+      - path: Vendor/WordDiffRuntime
         type: folder
         buildPhase: resources
     settings:

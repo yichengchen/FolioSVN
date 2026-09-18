@@ -1,8 +1,11 @@
 .DS_Store
 DerivedData/
 build/
+**/bin/
+**/obj/
+Vendor/WordDiffRuntime/*
+!Vendor/WordDiffRuntime/.gitkeep
 *.xcuserstate
 xcuserdata/
 
 test-svn/repos
-
