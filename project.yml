@@ -62,10 +62,14 @@ targets:
           fi
           if [ "$CODE_SIGNING_ALLOWED" != "NO" ]; then
             SIGN_IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
+            SIGN_OPTIONS="--options runtime"
+            if [ "$SIGN_IDENTITY" != "-" ] && [ "$CONFIGURATION" = "Release" ]; then
+              SIGN_OPTIONS="$SIGN_OPTIONS --timestamp"
+            fi
             find "$RUNTIME_DIR" -type f -name '*.dylib' -print0 | while IFS= read -r -d '' LIBRARY; do
-              codesign --force --options runtime --sign "$SIGN_IDENTITY" "$LIBRARY"
+              codesign --force $SIGN_OPTIONS --sign "$SIGN_IDENTITY" "$LIBRARY"
             done
-            codesign --force --options runtime --entitlements "$SRCROOT/Tools/WordDiffDemo/runtime.entitlements" --sign "$SIGN_IDENTITY" "$RUNTIME_DIR/worddiff-demo"
+            codesign --force $SIGN_OPTIONS --entitlements "$SRCROOT/Tools/WordDiffDemo/runtime.entitlements" --sign "$SIGN_IDENTITY" "$RUNTIME_DIR/worddiff-demo"
           fi
     sources:
       - path: Sources/SVNClient

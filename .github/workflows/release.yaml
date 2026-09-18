@@ -1,0 +1,234 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Sign, notarize and release (arm64)
+    runs-on: macos-26
+    environment: release
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      DEVELOPMENT_TEAM: MEWHFZ92DY
+      NSUnbufferedIO: 'YES'
+
+    steps:
+      - name: Check out tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Validate tag and credentials
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo '::error::Expected a version tag such as v1.0.0 or v1.0.0-beta.1'
+            exit 1
+          fi
+          echo "RELEASE_VERSION=${BASH_REMATCH[1]}" >> "$GITHUB_ENV"
+          for name in CERTIFICATE CERTIFICATE_PASSWORD NOTARY_APPLE_ID NOTARY_APP_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing release credential: $name (see docs/release.md)"
+              exit 1
+            fi
+          done
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+
+      - name: Verify committed SVN runtime
+        run: |
+          (cd Vendor/SVNRuntime && shasum -a 256 --check SHA256SUMS)
+          Scripts/validate-svn-runtime.sh Vendor/SVNRuntime
+
+      - name: Install XcodeGen 2.46.0
+        env:
+          XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+        run: |
+          curl --fail --location --retry 3 --silent --show-error \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Install .NET SDK for Word diff runtime
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Build Word diff runtime and verify generated project
+        run: |
+          Scripts/package-worddiff-runtime.sh
+          xcodegen generate
+          git diff --exit-code -- SVNClient.xcodeproj
+
+      - name: Run unsigned Debug tests
+        run: |
+          xcodebuild -project SVNClient.xcodeproj -scheme SVNClient \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
+
+      - name: Import Developer ID certificate into temporary keychain
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          umask 077
+          keychain="$RUNNER_TEMP/release-signing.keychain-db"
+          certificate="$RUNNER_TEMP/release-certificate.p12"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -P "$CERTIFICATE_PASSWORD" \
+            -k "$keychain" -t cert -f pkcs12 -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | \
+            awk -v team="$DEVELOPMENT_TEAM" '/"Developer ID Application:/ && index($0, "(" team ")") { print $2 }')"
+          if [[ ! "$identity" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+            echo '::error::Expected exactly one valid Developer ID Application identity for the configured team'
+            exit 1
+          fi
+          echo "SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          rm -f "$certificate"
+
+      - name: Archive signed Release app
+        run: |
+          xcodebuild -project SVNClient.xcodeproj -scheme SVNClient \
+            -configuration Release -destination 'platform=macOS,arch=arm64' \
+            -archivePath "$RUNNER_TEMP/FolioSVN.xcarchive" \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" ENABLE_HARDENED_RUNTIME=YES \
+            OTHER_CODE_SIGN_FLAGS=--timestamp \
+            MARKETING_VERSION="$RELEASE_VERSION" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            archive
+          application_path="$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:ApplicationPath' \
+            "$RUNNER_TEMP/FolioSVN.xcarchive/Info.plist")"
+          app="$RUNNER_TEMP/FolioSVN.xcarchive/Products/$application_path"
+          test -d "$app"
+          echo "RELEASE_APP_PATH=$app" >> "$GITHUB_ENV"
+          Scripts/validate-svn-runtime.sh "$app/Contents/Resources/SVNRuntime"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/notarization.zip"
+
+      - name: Notarize app and require Accepted status
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
+        run: |
+          umask 077
+          credentials=(--apple-id "$NOTARY_APPLE_ID" --password "$NOTARY_APP_PASSWORD" --team-id "$DEVELOPMENT_TEAM")
+          submit_exit=0
+          xcrun notarytool submit "$RUNNER_TEMP/notarization.zip" \
+            "${credentials[@]}" --wait --timeout 60m --output-format json \
+            > "$RUNNER_TEMP/notarization-result.json" || submit_exit=$?
+          cat "$RUNNER_TEMP/notarization-result.json"
+          submission_id="$(jq -r '.id // empty' "$RUNNER_TEMP/notarization-result.json")"
+          status="$(jq -r '.status // empty' "$RUNNER_TEMP/notarization-result.json")"
+          if [[ "$submit_exit" -ne 0 || "$status" != Accepted ]]; then
+            if [[ -n "$submission_id" ]]; then
+              xcrun notarytool log "$submission_id" "${credentials[@]}" \
+                "$RUNNER_TEMP/notarization-log.json" && cat "$RUNNER_TEMP/notarization-log.json" || true
+            fi
+            echo "::error::Notarization did not succeed (status: $status); no release will be published"
+            exit 1
+          fi
+
+      - name: Staple app and create signed DMG
+        run: |
+          xcrun stapler staple "$RELEASE_APP_PATH"
+          xcrun stapler validate "$RELEASE_APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$RELEASE_APP_PATH"
+          spctl --assess --type execute --verbose=2 "$RELEASE_APP_PATH"
+          mkdir -p "$RUNNER_TEMP/release-assets"
+          staging="$RUNNER_TEMP/dmg-staging"
+          mkdir -p "$staging"
+          ditto "$RELEASE_APP_PATH" "$staging/$(basename "$RELEASE_APP_PATH")"
+          ln -s /Applications "$staging/Applications"
+          dmg="$RUNNER_TEMP/release-assets/FolioSVN-${GITHUB_REF_NAME}.dmg"
+          hdiutil create -volname 'Folio SVN' -srcfolder "$staging" \
+            -format UDZO -fs HFS+ "$dmg"
+          codesign --sign "$SIGNING_IDENTITY" --timestamp "$dmg"
+          codesign --verify --strict --verbose=2 "$dmg"
+
+      - name: Notarize DMG and require Accepted status
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
+        run: |
+          umask 077
+          credentials=(--apple-id "$NOTARY_APPLE_ID" --password "$NOTARY_APP_PASSWORD" --team-id "$DEVELOPMENT_TEAM")
+          submit_exit=0
+          xcrun notarytool submit "$RUNNER_TEMP/release-assets/FolioSVN-${GITHUB_REF_NAME}.dmg" \
+            "${credentials[@]}" --wait --timeout 30m --output-format json \
+            > "$RUNNER_TEMP/dmg-notarization-result.json" || submit_exit=$?
+          cat "$RUNNER_TEMP/dmg-notarization-result.json"
+          submission_id="$(jq -r '.id // empty' "$RUNNER_TEMP/dmg-notarization-result.json")"
+          status="$(jq -r '.status // empty' "$RUNNER_TEMP/dmg-notarization-result.json")"
+          if [[ "$submit_exit" -ne 0 || "$status" != Accepted ]]; then
+            if [[ -n "$submission_id" ]]; then
+              xcrun notarytool log "$submission_id" "${credentials[@]}" \
+                "$RUNNER_TEMP/dmg-notarization-log.json" && cat "$RUNNER_TEMP/dmg-notarization-log.json" || true
+            fi
+            echo "::error::DMG notarization did not succeed (status: $status); no release will be published"
+            exit 1
+          fi
+
+      - name: Staple and verify final DMG
+        run: |
+          asset="FolioSVN-${GITHUB_REF_NAME}.dmg"
+          dmg="$RUNNER_TEMP/release-assets/$asset"
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          codesign --verify --strict --verbose=2 "$dmg"
+          hdiutil verify "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+          (cd "$RUNNER_TEMP/release-assets" && shasum -a 256 "$asset" > SHA256SUMS)
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          # Do not overwrite a published version on reruns.
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --title "Folio SVN $GITHUB_REF_NAME" --generate-notes \
+            "${prerelease[@]}" \
+            "$RUNNER_TEMP/release-assets/FolioSVN-${GITHUB_REF_NAME}.dmg" \
+            "$RUNNER_TEMP/release-assets/SHA256SUMS"
+
+      - name: Remove signing and notarization credentials
+        if: always()
+        run: |
+          keychain="$RUNNER_TEMP/release-signing.keychain-db"
+          if [[ -f "$keychain" ]]; then
+            security delete-keychain "$keychain"
+          fi
+          rm -f "$RUNNER_TEMP/release-certificate.p12"

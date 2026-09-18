@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 struct RepositorySession: Sendable {
     let profileID: UUID
@@ -146,6 +147,8 @@ final class BrowserViewModel {
     var onChange: (() -> Void)?
     var onRepositoryChanged: ((UUID, URL) -> Void)?
     var onMetadataChanged: (() -> Void)?
+    var onDirectoryCacheRefreshed: ((UUID, URL, DirectoryCacheSnapshot) -> Void)?
+    var onTreeDirectoryRefreshed: ((URL, [BrowserRow]) -> Void)?
 
     private(set) var rows: [BrowserRow] = []
     private(set) var state: State = .disconnected
@@ -166,16 +169,24 @@ final class BrowserViewModel {
     private var forwardStack: [URL] = []
     private var browsingRows: [BrowserRow] = []
     private var favoriteURLKeys: Set<String> = []
+    private var sessionGeneration = UUID()
+    private var directoryRequestID = UUID()
+    private var searchRequestID = UUID()
+    private var activityID = UUID()
+    private var activityTransferID: UUID?
     private let svnClient: any SVNClient
     private let metadataService: RepositoryMetadataService?
+    private let cacheRootURL: URL?
+    private var backgroundDirectoryTasks: [URL: (id: UUID, task: Task<Void, Never>)] = [:]
 
     var activeTransferCount: Int {
         transfers.filter { $0.state == .running }.count
     }
 
-    init(svnClient: any SVNClient, metadataService: RepositoryMetadataService? = nil) {
+    init(svnClient: any SVNClient, metadataService: RepositoryMetadataService? = nil, cacheRootURL: URL? = nil) {
         self.svnClient = svnClient
         self.metadataService = metadataService
+        self.cacheRootURL = cacheRootURL
     }
 
     func connect(to url: URL, options: SVNRequestOptions = .anonymous) async throws {
@@ -201,16 +212,52 @@ final class BrowserViewModel {
     }
 
     func connect(session: RepositorySession, initialURL: URL? = nil) async throws {
+        cancelBackgroundDirectoryTasks()
+        sessionGeneration = UUID()
+        let generation = sessionGeneration
+        directoryRequestID = UUID()
+        activityID = UUID()
+        activityTransferID = nil
         self.session = session
+        currentURL = nil
+        rows = []
+        browsingRows = []
+        favoriteURLKeys = []
+        directoryCachedAt = nil
+        directoryTreeGeneration += 1
         endSearchMode(restoreRows: false)
         backStack = []
         forwardStack = []
-        try? await reloadFavorites()
-        try await load(url: initialURL ?? session.baseURL, clearRows: true, policy: .preferCache)
+        do {
+            try await load(url: initialURL ?? session.baseURL, clearRows: true, policy: .preferCache)
+            try? await reloadFavorites()
+            try Task.checkCancellation()
+            guard generation == sessionGeneration else { throw CancellationError() }
+            onChange?()
+        } catch {
+            guard generation == sessionGeneration else { throw CancellationError() }
+            self.session = nil
+            currentURL = nil
+            rows = []
+            browsingRows = []
+            favoriteURLKeys = []
+            directoryCachedAt = nil
+            state = error is CancellationError ? .disconnected : .failed(error.localizedDescription)
+            isBusy = false
+            isCancellable = false
+            activityText = nil
+            onChange?()
+            throw error
+        }
     }
 
     func disconnect(profileID: UUID) {
         guard session?.profileID == profileID else { return }
+        cancelBackgroundDirectoryTasks()
+        sessionGeneration = UUID()
+        directoryRequestID = UUID()
+        activityID = UUID()
+        activityTransferID = nil
         session = nil
         currentURL = nil
         rows = []
@@ -230,44 +277,71 @@ final class BrowserViewModel {
 
     func openDirectory(_ row: BrowserRow) async throws {
         guard row.kind == .directory, let currentURL else { return }
-        let destination = itemURL(for: row)
-        endSearchMode(restoreRows: false)
-        backStack.append(currentURL)
-        forwardStack.removeAll()
-        do {
-            try await load(url: destination, clearRows: true, policy: .preferCache)
-        } catch {
-            _ = backStack.popLast()
-            throw error
-        }
+        guard row.url != currentURL else { return }
+        try await navigate(to: row.url)
     }
 
     func navigate(to url: URL) async throws {
         guard let currentURL, url != currentURL else { return }
-        backStack.append(currentURL)
-        forwardStack.removeAll()
         endSearchMode(restoreRows: false)
         try await load(url: url, clearRows: true, policy: .preferCache)
+        backStack.append(currentURL)
+        forwardStack.removeAll()
+        onChange?()
     }
 
     func goBack() async throws {
-        guard let destination = backStack.popLast(), let currentURL else { return }
-        forwardStack.append(currentURL)
+        guard let destination = backStack.last, let currentURL else { return }
         try await load(url: destination, clearRows: true, policy: .preferCache)
+        _ = backStack.popLast()
+        forwardStack.append(currentURL)
+        onChange?()
     }
 
     func goForward() async throws {
-        guard let destination = forwardStack.popLast(), let currentURL else { return }
-        backStack.append(currentURL)
+        guard let destination = forwardStack.last, let currentURL else { return }
         try await load(url: destination, clearRows: true, policy: .preferCache)
+        _ = forwardStack.popLast()
+        backStack.append(currentURL)
+        onChange?()
     }
 
-    func refresh() async throws {
+    func refresh(
+        expandedDirectoryURLs: [URL] = [],
+        shouldRefreshDirectory: (URL) -> Bool = { _ in true }
+    ) async throws {
         guard let session, let currentURL else { return }
         endSearchMode(restoreRows: false)
         try await load(url: currentURL, clearRows: false, policy: .reload)
-        noticeText = "目录缓存已刷新"
+        let requestID = directoryRequestID
+        let generation = sessionGeneration
         onRepositoryChanged?(session.profileID, currentURL)
+        var failures: [String] = []
+        let directories = Array(Set(expandedDirectoryURLs)).sorted {
+            if $0.pathComponents.count != $1.pathComponents.count { return $0.pathComponents.count < $1.pathComponents.count }
+            return $0.absoluteString < $1.absoluteString
+        }
+        if !directories.isEmpty {
+            try await performActivity("正在刷新已展开的文件夹…", cancellable: true) {
+                for url in directories {
+                    try self.checkDirectoryRequest(requestID, generation: generation)
+                    guard shouldRefreshDirectory(url) else { continue }
+                    do {
+                        let rows = try await self.rows(in: url, forceReload: true)
+                        try self.checkDirectoryRequest(requestID, generation: generation)
+                        // A folder collapsed while this read was pending needs no UI update.
+                        if shouldRefreshDirectory(url) { self.onTreeDirectoryRefreshed?(url, rows) }
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        try self.checkDirectoryRequest(requestID, generation: generation)
+                        failures.append(url.lastPathComponent)
+                    }
+                }
+            }
+        }
+        try checkDirectoryRequest(requestID, generation: generation)
+        noticeText = failures.isEmpty ? "目录缓存已刷新" : "当前目录已刷新 · 子目录刷新失败，保留原内容：" + failures.joined(separator: "、")
         onChange?()
     }
 
@@ -276,21 +350,32 @@ final class BrowserViewModel {
 
     func rows(in directoryURL: URL, forceReload: Bool = false) async throws -> [BrowserRow] {
         guard let session else { throw SVNClientError.unsupportedOperation }
+        let sessionID = sessionGeneration
         if !forceReload,
            let snapshot = try? await metadataService?.directoryCache(
                profileID: session.profileID,
                url: directoryURL
            ) {
+            try Task.checkCancellation()
+            guard sessionID == sessionGeneration else { throw CancellationError() }
+            if snapshot.isExpired() { scheduleDirectoryRevalidation(url: directoryURL, session: session, pageRequestID: nil) }
             return snapshot.entries.map { BrowserRow(entry: $0, parentURL: directoryURL) }
         }
         let generation = directoryTreeGeneration
         let entries = try await svnClient.list(url: directoryURL, options: session.options)
+        try Task.checkCancellation()
+        guard sessionID == sessionGeneration else { throw CancellationError() }
         if generation == directoryTreeGeneration, session.profileID == self.session?.profileID {
+            let cachedAt = Date()
             try? await metadataService?.replaceDirectoryCache(
                 profileID: session.profileID,
                 url: directoryURL,
-                entries: entries
+                entries: entries,
+                cachedAt: cachedAt
             )
+            try Task.checkCancellation()
+            guard sessionID == sessionGeneration, generation == directoryTreeGeneration else { throw CancellationError() }
+            if forceReload { onDirectoryCacheRefreshed?(session.profileID, directoryURL, DirectoryCacheSnapshot(entries: entries, cachedAt: cachedAt)) }
         }
         return entries.map { BrowserRow(entry: $0, parentURL: directoryURL) }
     }
@@ -423,15 +508,19 @@ final class BrowserViewModel {
     }
 
     func localURLForOpening(_ row: BrowserRow) async throws -> URL {
-        guard let session else { throw SVNClientError.unsupportedOperation }
+        try editableCopy(of: await localSnapshotURL(for: row))
+    }
+
+    func localSnapshotURL(for row: BrowserRow) async throws -> URL {
+        guard let session, row.kind == .file else { throw SVNClientError.unsupportedOperation }
         let effectiveRevision: Int?
-        if isShowingSearchResults {
+        if isShowingSearchResults || row.revision == nil {
             let liveInfo = try await svnClient.info(url: row.url, options: session.options)
-            effectiveRevision = liveInfo.lastChangedRevision
+            effectiveRevision = liveInfo.lastChangedRevision ?? liveInfo.revision
         } else {
             effectiveRevision = row.revision
         }
-        let cacheURL = try Self.openCacheURL(
+        let cacheURL = try snapshotCacheURL(
             profileID: session.profileID,
             revision: effectiveRevision,
             itemURL: itemURL(for: row)
@@ -453,6 +542,7 @@ final class BrowserViewModel {
                 overwrite: true
             )
         }
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: cacheURL.path)
         return cacheURL
     }
 
@@ -530,7 +620,14 @@ final class BrowserViewModel {
     }
 
     func localURLForOpening(history: BrowserFileHistory, revision: Int) async throws -> URL {
-        let cacheURL = try Self.openCacheURL(
+        try editableCopy(of: await localSnapshotURL(history: history, revision: revision))
+    }
+
+    func localSnapshotURL(history: BrowserFileHistory, revision: Int) async throws -> URL {
+        guard history.entries.contains(where: { $0.revision == revision }) else {
+            throw SVNClientError.unsupportedOperation
+        }
+        let cacheURL = try snapshotCacheURL(
             profileID: history.profileID,
             revision: revision,
             itemURL: history.sourceURL
@@ -542,6 +639,7 @@ final class BrowserViewModel {
             )
             try await download(history: history, revision: revision, to: cacheURL, overwrite: true)
         }
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: cacheURL.path)
         return cacheURL
     }
 
@@ -550,6 +648,7 @@ final class BrowserViewModel {
         revision: Int,
         message: String
     ) async throws -> SVNWriteResult {
+        let generation = sessionGeneration
         guard revision != history.currentRevision else { throw SVNClientError.alreadyCurrentRevision }
         guard history.entries.contains(where: { $0.revision == revision }) else {
             throw SVNClientError.unsupportedOperation
@@ -585,11 +684,8 @@ final class BrowserViewModel {
                 options: history.options
             )
         }
-        await invalidateDirectoryCache(profileID: history.profileID)
-        if currentURL == history.sourceURL.deletingLastPathComponent() {
-            try await refresh()
-        }
-        showWriteSuccess("已恢复 r\(revision) 的内容", result: result)
+        await finishCommittedWrite("已恢复 r\(revision) 的内容", result: result,
+            profileID: history.profileID, generation: generation)
         return result
     }
 
@@ -641,20 +737,25 @@ final class BrowserViewModel {
             favoriteURLKeys = []
             return
         }
-        favoriteURLKeys = Set(
+        let generation = sessionGeneration
+        let keys = Set(
             try await metadataService.favorites()
                 .filter { $0.profileID == session.profileID }
                 .map { $0.url.absoluteString }
         )
+        guard generation == sessionGeneration else { return }
+        favoriteURLKeys = keys
     }
 
-    func refreshSearchIndex() async throws {
+    func refreshSearchIndex(updateSearchResults: Bool = true) async throws {
         guard let session, let metadataService else { throw SVNClientError.unsupportedOperation }
+        let generation = sessionGeneration
         let rootURL = session.searchRootURL
         let entries = try await performActivity("正在更新文件名索引…", cancellable: true) {
             try await self.svnClient.listRecursively(url: rootURL, options: session.options)
         }
         try Task.checkCancellation()
+        guard generation == sessionGeneration else { throw CancellationError() }
         let indexedEntries = entries.map { entry -> SearchIndexEntry in
             let components = entry.name.split(separator: "/").map(String.init)
             let url = components.enumerated().reduce(rootURL) { partial, pair in
@@ -680,9 +781,11 @@ final class BrowserViewModel {
             entries: indexedEntries,
             indexedAt: indexedAt
         )
+        try Task.checkCancellation()
+        guard generation == sessionGeneration else { throw CancellationError() }
         searchIndexedAt = indexedAt
         noticeText = "索引更新完成 · \(indexedEntries.count) 项"
-        if !searchQuery.isEmpty {
+        if updateSearchResults, !searchQuery.isEmpty {
             try await search(query: searchQuery, scope: searchScope, refreshIfMissing: false)
         }
         onChange?()
@@ -695,6 +798,9 @@ final class BrowserViewModel {
             return
         }
         guard let session, let metadataService else { throw SVNClientError.unsupportedOperation }
+        let requestID = UUID()
+        let generation = sessionGeneration
+        searchRequestID = requestID
         searchQuery = normalizedQuery
         searchScope = scope
         var results = try await metadataService.search(
@@ -703,8 +809,10 @@ final class BrowserViewModel {
             directoryURL: scope == .currentDirectory ? currentURL : nil,
             query: normalizedQuery
         )
+        try checkSearchRequest(requestID, generation: generation)
         if results.indexedAt == nil, refreshIfMissing {
-            try await refreshSearchIndex()
+            try await refreshSearchIndex(updateSearchResults: false)
+            try checkSearchRequest(requestID, generation: generation)
             results = try await metadataService.search(
                 profileID: session.profileID,
                 rootURL: session.searchRootURL,
@@ -712,11 +820,17 @@ final class BrowserViewModel {
                 query: normalizedQuery
             )
         }
+        try checkSearchRequest(requestID, generation: generation)
         rows = results.entries.map(BrowserRow.init(searchEntry:))
         isShowingSearchResults = true
         searchIndexedAt = results.indexedAt
         noticeText = nil
         onChange?()
+    }
+
+    private func checkSearchRequest(_ requestID: UUID, generation: UUID) throws {
+        try Task.checkCancellation()
+        guard requestID == searchRequestID, generation == sessionGeneration else { throw CancellationError() }
     }
 
     func clearSearch() {
@@ -726,6 +840,7 @@ final class BrowserViewModel {
 
     func createDirectory(name: String, in directoryURL: URL? = nil, message: String) async throws -> SVNWriteResult {
         guard let session, let currentURL else { throw SVNClientError.unsupportedOperation }
+        let generation = sessionGeneration
         let targetDirectoryURL = directoryURL ?? currentURL
         let result = try await performActivity("正在新建文件夹…") {
             try await self.svnClient.makeDirectory(
@@ -734,14 +849,14 @@ final class BrowserViewModel {
                 options: session.options
             )
         }
-        await invalidateDirectoryCache(profileID: session.profileID)
-        try await refresh()
-        showWriteSuccess("文件夹已创建", result: result)
+        await finishCommittedWrite("文件夹已创建", result: result,
+            profileID: session.profileID, generation: generation)
         return result
     }
 
     func rename(_ row: BrowserRow, to name: String, message: String) async throws -> SVNWriteResult {
         guard let session, currentURL != nil else { throw SVNClientError.unsupportedOperation }
+        let generation = sessionGeneration
         let sourceURL = itemURL(for: row)
         let destinationURL = sourceURL.deletingLastPathComponent()
             .appendingPathComponent(name, isDirectory: row.kind == .directory)
@@ -753,12 +868,10 @@ final class BrowserViewModel {
                 options: session.options
             )
         }
-        await invalidateDirectoryCache(profileID: session.profileID)
-        try await refresh()
-        try? await metadataService?.movePaths(profileID: session.profileID, from: sourceURL, to: destinationURL)
-        try? await reloadFavorites()
-        showWriteSuccess("重命名完成", result: result)
-        onMetadataChanged?()
+        await finishCommittedWrite("重命名完成", result: result,
+            profileID: session.profileID, generation: generation, updatesMetadata: true) {
+            try await self.metadataService?.movePaths(profileID: session.profileID, from: sourceURL, to: destinationURL)
+        }
         return result
     }
 
@@ -769,6 +882,7 @@ final class BrowserViewModel {
     func delete(_ rows: [BrowserRow], message: String) async throws -> SVNWriteResult {
         guard let session else { throw SVNClientError.unsupportedOperation }
         guard !rows.isEmpty else { throw SVNClientError.unsupportedOperation }
+        let generation = sessionGeneration
         let deletedURLs = rows.map(\.url)
         let activity = rows.count == 1 ? "正在删除“\(rows[0].name)”…" : "正在删除 \(rows.count) 项…"
         let result = try await performActivity(activity) {
@@ -778,18 +892,18 @@ final class BrowserViewModel {
                 options: session.options
             )
         }
-        await invalidateDirectoryCache(profileID: session.profileID)
-        try await refresh()
-        for deletedURL in deletedURLs {
-            try? await metadataService?.markFavoritesUnavailable(profileID: session.profileID, atOrBelow: deletedURL)
+        await finishCommittedWrite(rows.count == 1 ? "删除完成" : "已删除 \(rows.count) 项", result: result,
+            profileID: session.profileID, generation: generation, updatesMetadata: true) {
+            for deletedURL in deletedURLs {
+                try await self.metadataService?.markFavoritesUnavailable(profileID: session.profileID, atOrBelow: deletedURL)
+            }
         }
-        showWriteSuccess(rows.count == 1 ? "删除完成" : "已删除 \(rows.count) 项", result: result)
-        onMetadataChanged?()
         return result
     }
 
     func upload(files: [URL], to directoryURL: URL? = nil, message: String) async throws -> SVNWriteResult {
         guard let session, let currentURL else { throw SVNClientError.unsupportedOperation }
+        let generation = sessionGeneration
         let targetDirectoryURL = directoryURL ?? currentURL
         let existingNames: Set<String> = targetDirectoryURL == currentURL ? Set(rows.map(\.name)) : []
         if let conflict = files.first(where: { existingNames.contains($0.lastPathComponent) }) {
@@ -820,14 +934,14 @@ final class BrowserViewModel {
                 options: session.options
             )
         }
-        await invalidateDirectoryCache(profileID: session.profileID)
-        try await refresh()
-        showWriteSuccess("上传完成", result: result)
+        await finishCommittedWrite("上传完成", result: result,
+            profileID: session.profileID, generation: generation)
         return result
     }
 
     func replace(_ row: BrowserRow, with localFileURL: URL, message: String) async throws -> SVNWriteResult {
         guard let session, let revision = row.revision else { throw SVNClientError.remoteChanged }
+        let generation = sessionGeneration
         let localSize = (try? localFileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize)
             .map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? "大小未知"
         let result = try await performTransfer(
@@ -847,9 +961,8 @@ final class BrowserViewModel {
                 options: session.options
             )
         }
-        await invalidateDirectoryCache(profileID: session.profileID)
-        try await refresh()
-        showWriteSuccess("替换完成", result: result)
+        await finishCommittedWrite("替换完成", result: result,
+            profileID: session.profileID, generation: generation)
         return result
     }
 
@@ -874,16 +987,17 @@ final class BrowserViewModel {
         case reload
     }
 
-    private func load(url: URL, clearRows: Bool, policy: DirectoryLoadPolicy) async throws {
+    private func load(url: URL, clearRows: Bool, policy: DirectoryLoadPolicy, requestID: UUID = UUID()) async throws {
         guard let session else { return }
-        if policy == .preferCache,
-           let snapshot = try? await metadataService?.directoryCache(profileID: session.profileID, url: url) {
-            applyDirectoryEntries(snapshot.entries, url: url, cachedAt: snapshot.cachedAt)
-            return
-        }
-        let previousRows = rows
+        cancelBackgroundDirectoryTasks()
+        endSearchMode(restoreRows: true)
+        let generation = sessionGeneration
+        directoryRequestID = requestID
+        activityID = requestID
+        activityTransferID = nil
+        let previousRows = isShowingSearchResults ? rows : browsingRows
         let previousURL = currentURL
-        let previousState = state
+        let previousState: State = previousURL.map(State.loaded) ?? .disconnected
         state = .loading
         isBusy = true
         isCancellable = true
@@ -893,7 +1007,16 @@ final class BrowserViewModel {
         onChange?()
 
         do {
+            if policy == .preferCache,
+               let snapshot = try? await metadataService?.directoryCache(profileID: session.profileID, url: url) {
+                try checkDirectoryRequest(requestID, generation: generation)
+                applyDirectoryEntries(snapshot.entries, url: url, cachedAt: snapshot.cachedAt)
+                if snapshot.isExpired() { scheduleDirectoryRevalidation(url: url, session: session, pageRequestID: requestID) }
+                return
+            }
+            try checkDirectoryRequest(requestID, generation: generation)
             let entries = try await svnClient.list(url: url, options: session.options)
+            try checkDirectoryRequest(requestID, generation: generation)
             let cachedAt = Date()
             try? await metadataService?.replaceDirectoryCache(
                 profileID: session.profileID,
@@ -901,8 +1024,12 @@ final class BrowserViewModel {
                 entries: entries,
                 cachedAt: cachedAt
             )
+            try checkDirectoryRequest(requestID, generation: generation)
             applyDirectoryEntries(entries, url: url, cachedAt: cachedAt)
         } catch is CancellationError {
+            guard requestID == directoryRequestID, generation == sessionGeneration else {
+                throw CancellationError()
+            }
             rows = previousRows
             currentURL = previousURL
             state = previousState
@@ -912,6 +1039,9 @@ final class BrowserViewModel {
             onChange?()
             throw CancellationError()
         } catch {
+            guard requestID == directoryRequestID, generation == sessionGeneration else {
+                throw CancellationError()
+            }
             state = .failed(error.localizedDescription)
             isBusy = false
             isCancellable = false
@@ -919,6 +1049,56 @@ final class BrowserViewModel {
             onChange?()
             throw error
         }
+    }
+
+    private func checkDirectoryRequest(_ requestID: UUID, generation: UUID) throws {
+        try Task.checkCancellation()
+        guard requestID == directoryRequestID, generation == sessionGeneration else {
+            throw CancellationError()
+        }
+    }
+
+    private func cancelBackgroundDirectoryTasks() {
+        backgroundDirectoryTasks.values.forEach { $0.task.cancel() }
+        backgroundDirectoryTasks.removeAll()
+    }
+
+    private func scheduleDirectoryRevalidation(url: URL, session: RepositorySession, pageRequestID: UUID?) {
+        guard let metadataService, backgroundDirectoryTasks[url] == nil else { return }
+        let id = UUID()
+        let generation = sessionGeneration
+        let treeGeneration = directoryTreeGeneration
+        let svnClient = svnClient
+        backgroundDirectoryTasks[url] = (id, Task { @MainActor [weak self] in
+            defer {
+                if self?.backgroundDirectoryTasks[url]?.id == id { self?.backgroundDirectoryTasks.removeValue(forKey: url) }
+            }
+            do {
+                let snapshot = try await metadataService.refreshDirectoryCache(profileID: session.profileID, url: url) {
+                    try await svnClient.list(url: url, options: session.options)
+                }
+                try Task.checkCancellation()
+                guard let self, self.sessionGeneration == generation,
+                      self.directoryTreeGeneration == treeGeneration else { return }
+                if let pageRequestID {
+                    guard self.directoryRequestID == pageRequestID, self.currentURL == url,
+                          !self.isShowingSearchResults, !self.isBusy else { return }
+                    self.applyDirectoryEntries(snapshot.entries, url: url, cachedAt: snapshot.cachedAt)
+                } else {
+                    self.onTreeDirectoryRefreshed?(url, snapshot.entries.map { BrowserRow(entry: $0, parentURL: url) })
+                }
+                self.onDirectoryCacheRefreshed?(session.profileID, url, snapshot)
+            } catch is CancellationError {
+                // Navigation and explicit refresh take precedence over a stale-cache read.
+            } catch {
+                guard let self, !Task.isCancelled, self.sessionGeneration == generation,
+                      self.directoryTreeGeneration == treeGeneration,
+                      let pageRequestID, self.directoryRequestID == pageRequestID,
+                      !self.isShowingSearchResults, !self.isBusy else { return }
+                self.noticeText = "正在显示缓存 · 后台刷新失败，请手动刷新：" + error.localizedDescription
+                self.onChange?()
+            }
+        })
     }
 
     private func applyDirectoryEntries(_ entries: [SVNListEntry], url: URL, cachedAt: Date) {
@@ -935,35 +1115,75 @@ final class BrowserViewModel {
         onChange?()
     }
 
-    private func invalidateDirectoryCache(profileID: UUID) async {
-        try? await metadataService?.clearDirectoryCache(profileID: profileID)
+    private func finishCommittedWrite(
+        _ message: String,
+        result: SVNWriteResult,
+        profileID: UUID,
+        generation: UUID,
+        updatesMetadata: Bool = false,
+        metadataUpdate: () async throws -> Void = {}
+    ) async {
+        // A successful commit cannot become a failed write because a subsequent local/read operation fails.
+        let previousDirectoryRequestID = directoryRequestID
+        var warnings: [String] = []
+        do { try await metadataUpdate() } catch { warnings.append("收藏同步失败") }
+        do { try await metadataService?.clearDirectoryCache(profileID: profileID) }
+        catch { warnings.append("本地目录缓存清理失败") }
+        if updatesMetadata { onMetadataChanged?() }
+        guard generation == sessionGeneration, session?.profileID == profileID else { return }
         directoryTreeGeneration += 1
+        if updatesMetadata {
+            do { try await reloadFavorites() } catch { warnings.append("收藏状态读取失败") }
+        }
+        guard generation == sessionGeneration else { return }
+        // Local metadata work must not supersede navigation started after this commit.
+        guard previousDirectoryRequestID == directoryRequestID else { return }
+        if let currentURL {
+            let refreshRequestID = UUID()
+            do {
+                try await load(url: currentURL, clearRows: false, policy: .reload, requestID: refreshRequestID)
+                onRepositoryChanged?(profileID, currentURL)
+            }
+            catch {
+                guard generation == sessionGeneration, refreshRequestID == directoryRequestID else { return }
+                // Do not leave pre-commit rows actionable after a failed refresh.
+                rows = []
+                browsingRows = []
+                warnings.append("目录刷新失败，请手动刷新；不要重复提交")
+            }
+        }
+        guard generation == sessionGeneration else { return }
+        showWriteSuccess(message, result: result)
+        if !warnings.isEmpty {
+            noticeText = (noticeText ?? message) + " · 已提交成功，但" + warnings.joined(separator: "；")
+            onChange?()
+        }
     }
 
     private func performActivity<Result: Sendable>(
         _ text: String,
         cancellable: Bool = false,
+        transferID: UUID? = nil,
         operation: () async throws -> Result
     ) async throws -> Result {
+        let id = UUID()
+        activityID = id
+        activityTransferID = transferID
         isBusy = true
         isCancellable = cancellable
         activityText = text
         noticeText = nil
         onChange?()
-        do {
-            let result = try await operation()
-            isBusy = false
-            isCancellable = false
-            activityText = nil
-            onChange?()
-            return result
-        } catch {
-            isBusy = false
-            isCancellable = false
-            activityText = nil
-            onChange?()
-            throw error
+        defer {
+            if activityID == id {
+                isBusy = false
+                isCancellable = false
+                activityText = nil
+                activityTransferID = nil
+                onChange?()
+            }
         }
+        return try await operation()
     }
 
     private func performTransfer<Result: Sendable>(
@@ -996,7 +1216,8 @@ final class BrowserViewModel {
         do {
             let result = try await performActivity(
                 "正在\(title)…",
-                cancellable: cancellable
+                cancellable: cancellable,
+                transferID: id
             ) {
                 try await operation { [weak self] stage in
                     self?.updateTransferStage(id: id, stage: stage)
@@ -1035,7 +1256,9 @@ final class BrowserViewModel {
             return
         }
         transfers[index].stage = stage
-        activityText = "\(transfers[index].title) · \(stage.text)"
+        if activityTransferID == id {
+            activityText = "\(transfers[index].title) · \(stage.text)"
+        }
         onChange?()
     }
 
@@ -1059,25 +1282,46 @@ final class BrowserViewModel {
     }
 
     private func endSearchMode(restoreRows: Bool) {
+        searchRequestID = UUID()
         if restoreRows { rows = browsingRows }
         isShowingSearchResults = false
         searchQuery = ""
         searchIndexedAt = nil
     }
 
-    private static func openCacheURL(profileID: UUID, revision: Int?, itemURL: URL) throws -> URL {
-        let cacheRoot = try FileManager.default.url(
+    private func managedCacheRoot() throws -> URL {
+        if let cacheRootURL { return cacheRootURL }
+        return try FileManager.default.url(
             for: .cachesDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
             create: true
-        ).appendingPathComponent("SVNClient/OpenCache", isDirectory: true)
+        ).appendingPathComponent("SVNClient", isDirectory: true)
+    }
+
+    private func snapshotCacheURL(profileID: UUID, revision: Int?, itemURL: URL) throws -> URL {
+        // A new namespace deliberately excludes legacy OpenCache files, which may have been edited.
+        let cacheRoot = try managedCacheRoot().appendingPathComponent("RevisionSnapshots-v1", isDirectory: true)
         let revision = revision.map(String.init) ?? "HEAD"
-        let pathComponents = itemURL.pathComponents.filter { $0 != "/" }
-        return pathComponents.reduce(
-            cacheRoot.appendingPathComponent(profileID.uuidString).appendingPathComponent(revision),
-            { $0.appendingPathComponent($1) }
-        )
+        let key = SHA256.hash(data: Data(itemURL.absoluteString.utf8)).map { String(format: "%02x", $0) }.joined()
+        return cacheRoot.appendingPathComponent(profileID.uuidString)
+            .appendingPathComponent(revision).appendingPathComponent(key)
+            .appendingPathComponent(itemURL.lastPathComponent)
+    }
+
+    private func editableCopy(of snapshotURL: URL) throws -> URL {
+        let directory = try managedCacheRoot().appendingPathComponent("OpenDocuments", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let copyURL = directory.appendingPathComponent(snapshotURL.lastPathComponent)
+        do {
+            try FileManager.default.copyItem(at: snapshotURL, to: copyURL)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: copyURL.path)
+            return copyURL
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
     }
 
     var statusText: String {

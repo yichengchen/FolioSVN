@@ -471,7 +471,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "RUNTIME_DIR=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/WordDiffRuntime\"\nif [ ! -x \"$RUNTIME_DIR/worddiff-demo\" ]; then\n  echo \"error: Run Scripts/package-worddiff-runtime.sh before building.\"\n  exit 1\nfi\nif [ \"$CODE_SIGNING_ALLOWED\" != \"NO\" ]; then\n  SIGN_IDENTITY=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\n  find \"$RUNTIME_DIR\" -type f -name '*.dylib' -print0 | while IFS= read -r -d '' LIBRARY; do\n    codesign --force --options runtime --sign \"$SIGN_IDENTITY\" \"$LIBRARY\"\n  done\n  codesign --force --options runtime --entitlements \"$SRCROOT/Tools/WordDiffDemo/runtime.entitlements\" --sign \"$SIGN_IDENTITY\" \"$RUNTIME_DIR/worddiff-demo\"\nfi\n";
+			shellScript = "RUNTIME_DIR=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/WordDiffRuntime\"\nif [ ! -x \"$RUNTIME_DIR/worddiff-demo\" ]; then\n  echo \"error: Run Scripts/package-worddiff-runtime.sh before building.\"\n  exit 1\nfi\nif [ \"$CODE_SIGNING_ALLOWED\" != \"NO\" ]; then\n  SIGN_IDENTITY=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\n  SIGN_OPTIONS=\"--options runtime\"\n  if [ \"$SIGN_IDENTITY\" != \"-\" ] && [ \"$CONFIGURATION\" = \"Release\" ]; then\n    SIGN_OPTIONS=\"$SIGN_OPTIONS --timestamp\"\n  fi\n  find \"$RUNTIME_DIR\" -type f -name '*.dylib' -print0 | while IFS= read -r -d '' LIBRARY; do\n    codesign --force $SIGN_OPTIONS --sign \"$SIGN_IDENTITY\" \"$LIBRARY\"\n  done\n  codesign --force $SIGN_OPTIONS --entitlements \"$SRCROOT/Tools/WordDiffDemo/runtime.entitlements\" --sign \"$SIGN_IDENTITY\" \"$RUNTIME_DIR/worddiff-demo\"\nfi\n";
 		};
 		791F782C15CD6677EAFA2C13 /* Validate bundled SVN runtime */ = {
 			isa = PBXShellScriptBuildPhase;

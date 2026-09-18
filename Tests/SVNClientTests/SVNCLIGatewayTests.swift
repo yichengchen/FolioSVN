@@ -11,6 +11,43 @@ private func makeMockGateway(_ runner: MockSVNCommandRunner) -> SVNCLIGateway {
 }
 
 final class SVNCLIGatewayTests: XCTestCase {
+    func testExportWithoutOverwritePreservesFileCreatedDuringDownload() async throws {
+        try await assertLateDestinationIsPreserved(isDirectory: false)
+    }
+
+    func testExportWithoutOverwritePreservesDirectoryCreatedDuringDownload() async throws {
+        try await assertLateDestinationIsPreserved(isDirectory: true)
+    }
+
+    private func assertLateDestinationIsPreserved(isDirectory: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("export-race-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let destination = root.appendingPathComponent("download", isDirectory: isDirectory)
+        let gateway = SVNCLIGateway(runner: ExportDestinationRaceRunner(destination: destination, isDirectory: isDirectory),
+            executableURL: URL(fileURLWithPath: "/bin/true"))
+        do {
+            try await gateway.export(url: URL(string: "https://example.com/file")!, to: destination,
+                revision: 1, overwrite: false, options: .anonymous)
+            XCTFail("Destination created after the initial check must not be overwritten")
+        } catch SVNClientError.destinationExists {}
+        let contentURL = isDirectory ? destination.appendingPathComponent("content.txt") : destination
+        XCTAssertEqual(try String(contentsOf: contentURL, encoding: .utf8), "user-created-content")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["download"], "Partial export must be cleaned")
+    }
+
+    func testExportWithOverwriteStillAllowsAuthorizedReplacement() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("export-authorized-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let destination = root.appendingPathComponent("download.txt")
+        let gateway = SVNCLIGateway(runner: ExportDestinationRaceRunner(destination: destination, isDirectory: false),
+            executableURL: URL(fileURLWithPath: "/bin/true"))
+        try await gateway.export(url: URL(string: "https://example.com/file")!, to: destination,
+            revision: 1, overwrite: true, options: .anonymous)
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "repository-content")
+    }
+
     func testProcessRunnerCancellationDoesNotWaitForChildCommand() async throws {
         let runner = ProcessSVNCommandRunner()
         let task = Task {
@@ -300,6 +337,23 @@ final class SVNCLIGatewayTests: XCTestCase {
         }
     }
 
+}
+
+private struct ExportDestinationRaceRunner: SVNCommandRunning {
+    let destination: URL
+    let isDirectory: Bool
+    func run(executableURL: URL, arguments: [String], environment: [String: String]?, standardInput: Data?) async throws -> SVNProcessOutput {
+        let partial = URL(fileURLWithPath: arguments[2])
+        if isDirectory {
+            try FileManager.default.createDirectory(at: partial, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        }
+        let partialContent = isDirectory ? partial.appendingPathComponent("content.txt") : partial
+        let destinationContent = isDirectory ? destination.appendingPathComponent("content.txt") : destination
+        try Data("repository-content".utf8).write(to: partialContent)
+        try Data("user-created-content".utf8).write(to: destinationContent)
+        return SVNProcessOutput(standardOutput: Data(), standardError: Data(), exitStatus: 0)
+    }
 }
 
 private actor HangingSVNCommandRunner: SVNCommandRunning {

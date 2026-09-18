@@ -1,9 +1,536 @@
 import Foundation
+import AppKit
 import XCTest
 @testable import SVNClient
 
 @MainActor
 final class BrowserViewModelTests: XCTestCase {
+    func testManualRefreshUpdatesExpandedDescendantsAndKeepsSelection() async throws {
+        try await assertVisibleTreeRefresh(collapseParent: false)
+    }
+
+    func testManualRefreshDoesNotLoadCollapsedBranchesOrRememberedDescendants() async throws {
+        try await assertVisibleTreeRefresh(collapseParent: true)
+    }
+
+    private func assertVisibleTreeRefresh(collapseParent: Bool) async throws {
+        let metadata = RepositoryMetadataService(store: try RepositoryMetadataStore(inMemory: ()))
+        let client = ExpandedRefreshSVNClient()
+        let model = BrowserViewModel(svnClient: client, metadataService: metadata)
+        let root = URL(string: "https://example.com/root")!
+        try await model.connect(to: root)
+        let controller = BrowserViewController(viewModel: model)
+        _ = controller.view
+        let scroll = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? NSScrollView }.first)
+        let outline = try XCTUnwrap(scroll.documentView as? NSOutlineView)
+        func index(named name: String) -> Int? {
+            (0..<outline.numberOfRows).first { index in
+                guard let item = outline.item(atRow: index) else { return false }
+                return (controller.outlineView(outline, viewFor: outline.tableColumns[0], item: item) as? NSTableCellView)?.textField?.stringValue == name
+            }
+        }
+        let folder = try XCTUnwrap(outline.item(atRow: try XCTUnwrap(index(named: "expanded"))))
+        outline.expandItem(folder)
+        for _ in 0..<1000 { if index(named: "nested") != nil { break }; await Task.yield() }
+        let nested = try XCTUnwrap(outline.item(atRow: try XCTUnwrap(index(named: "nested"))))
+        outline.expandItem(nested)
+        for _ in 0..<1000 { if index(named: "old-leaf.txt") != nil { break }; await Task.yield() }
+        XCTAssertNotNil(index(named: "old-leaf.txt"))
+        let keepIndex = try XCTUnwrap(index(named: "keep.txt"))
+        outline.selectRowIndexes(IndexSet(integer: keepIndex), byExtendingSelection: false)
+        if collapseParent { outline.collapseItem(folder) }
+        await client.setUpdated()
+        try await controller.refreshVisibleDirectories()
+        let counts = await client.counts
+        XCTAssertEqual(counts["root"], 2)
+        XCTAssertEqual(counts["expanded"], collapseParent ? 1 : 2)
+        XCTAssertEqual(counts["nested"], collapseParent ? 1 : 2)
+        XCTAssertNil(counts["closed"], "Never request unopened folders")
+        XCTAssertEqual(outline.isItemExpanded(folder), !collapseParent)
+        XCTAssertEqual(model.currentURL, root)
+        XCTAssertFalse(model.canGoBack)
+        XCTAssertFalse(model.isBusy)
+        if !collapseParent {
+            XCTAssertTrue(outline.isItemExpanded(nested))
+            XCTAssertNotNil(index(named: "new-leaf.txt"))
+            XCTAssertNil(index(named: "old-leaf.txt"))
+            XCTAssertEqual(outline.selectedRow, index(named: "keep.txt"))
+            let childURL = root.appendingPathComponent("expanded", isDirectory: true).appendingPathComponent("nested", isDirectory: true)
+            let cache = try await metadata.directoryCache(profileID: try XCTUnwrap(model.session?.profileID), url: childURL)
+            XCTAssertEqual(cache?.entries.map(\.name), ["new-leaf.txt"])
+        }
+    }
+
+    func testExpandedRefreshContinuesAfterOneFolderFailsAndKeepsItsCache() async throws {
+        let client = ControlledListSVNClient()
+        let metadata = RepositoryMetadataService(store: try RepositoryMetadataStore(inMemory: ()))
+        let model = BrowserViewModel(svnClient: client, metadataService: metadata)
+        let root = URL(string: "https://example.com/root")!
+        let a = root.appendingPathComponent("a")
+        let b = root.appendingPathComponent("b")
+        try await model.connect(to: root)
+        let profileID = try XCTUnwrap(model.session?.profileID)
+        try await metadata.replaceDirectoryCache(profileID: profileID, url: a, entries: StabilitySVNClient.entries)
+        try await metadata.replaceDirectoryCache(profileID: profileID, url: b, entries: StabilitySVNClient.entries)
+        var refreshed: [URL] = []
+        model.onTreeDirectoryRefreshed = { url, _ in refreshed.append(url) }
+        let refresh = Task { try await model.refresh(expandedDirectoryURLs: [b, a, a]) }
+        await client.waitForRequest(a)
+        XCTAssertTrue(model.isBusy)
+        await client.resolve(a, result: .failure(.connectionTimedOut))
+        await client.waitForRequest(b)
+        await client.resolve(b, result: .success([]))
+        try await refresh.value
+        XCTAssertEqual(refreshed, [b])
+        XCTAssertTrue(model.noticeText?.contains("子目录刷新失败") == true)
+        let cache = try await metadata.directoryCache(profileID: profileID, url: a)
+        XCTAssertEqual(cache?.entries, StabilitySVNClient.entries)
+        let aCount = await client.listCount(for: a)
+        XCTAssertEqual(aCount, 1, "Duplicate expanded URLs are deduplicated")
+        XCTAssertEqual(model.state, .loaded(root))
+        XCTAssertFalse(model.isBusy)
+    }
+
+    func testNavigationSupersedesPendingExpandedRefresh() async throws {
+        let client = ControlledListSVNClient()
+        let model = BrowserViewModel(svnClient: client)
+        let root = URL(string: "https://example.com/root")!
+        let a = root.appendingPathComponent("a")
+        let b = root.appendingPathComponent("b")
+        let destination = URL(string: "https://example.com/new/root")!
+        try await model.connect(to: root)
+        var refreshed: [URL] = []
+        model.onTreeDirectoryRefreshed = { url, _ in refreshed.append(url) }
+        let refresh = Task { try await model.refresh(expandedDirectoryURLs: [a, b]) }
+        await client.waitForRequest(a)
+        try await model.navigate(to: destination)
+        await client.resolve(a, result: .success([]))
+        do { try await refresh.value; XCTFail("Expected obsolete refresh cancellation") }
+        catch is CancellationError {}
+        XCTAssertTrue(refreshed.isEmpty)
+        let bCount = await client.listCount(for: b)
+        XCTAssertEqual(bCount, 0)
+        XCTAssertEqual(model.currentURL, destination)
+        XCTAssertEqual(model.state, .loaded(destination))
+        XCTAssertFalse(model.isBusy)
+    }
+
+    func testDirectoryCacheExpiresAtExactly25Minutes() {
+        let date = Date(timeIntervalSince1970: 10000)
+        let snapshot = DirectoryCacheSnapshot(entries: [], cachedAt: date)
+        XCTAssertFalse(snapshot.isExpired(at: date.addingTimeInterval(1499.999)))
+        XCTAssertTrue(snapshot.isExpired(at: date.addingTimeInterval(1500)))
+        XCTAssertTrue(snapshot.isExpired(at: date.addingTimeInterval(1501)))
+    }
+
+    private func cachedPage(age: TimeInterval) async throws -> (BrowserViewModel, ControlledListSVNClient, RepositoryMetadataService, URL) {
+        let metadata = RepositoryMetadataService(store: try RepositoryMetadataStore(inMemory: ()))
+        let client = ControlledListSVNClient()
+        let url = URL(string: "https://example.com/cached")!
+        let profileID = UUID()
+        try await metadata.replaceDirectoryCache(profileID: profileID, url: url,
+            entries: StabilitySVNClient.entries, cachedAt: .now.addingTimeInterval(-age))
+        let model = BrowserViewModel(svnClient: client, metadataService: metadata)
+        try await model.connect(session: RepositorySession(profileID: profileID, displayName: "Cache",
+            baseURL: url, searchRootURL: url, options: .anonymous))
+        return (model, client, metadata, url)
+    }
+
+    func testFreshDirectoryCacheAvoidsServerRead() async throws {
+        let (model, client, _, _) = try await cachedPage(age: 24 * 60)
+        for _ in 0..<100 { await Task.yield() }
+        let count = await client.totalListCount
+        XCTAssertEqual(count, 0)
+        XCTAssertEqual(model.rows.map(\.name), StabilitySVNClient.entries.map(\.name))
+        XCTAssertFalse(model.isBusy)
+    }
+
+    func testExpiredCacheDisplaysImmediatelyThenUpdatesInBackground() async throws {
+        let (model, client, metadata, url) = try await cachedPage(age: 26 * 60)
+        await client.waitForRequest(url)
+        XCTAssertEqual(model.state, .loaded(url))
+        XCTAssertFalse(model.isBusy)
+        XCTAssertEqual(model.rows.map(\.name), StabilitySVNClient.entries.map(\.name))
+        let updated = expectation(description: "Background result applied")
+        let entries = [SVNListEntry(name: "fresh.txt", kind: .file, size: 3, revision: 10, author: nil, updatedAt: nil)]
+        model.onChange = { if model.rows.first?.name == "fresh.txt" { updated.fulfill() } }
+        await client.resolve(url, result: .success(entries))
+        await fulfillment(of: [updated], timeout: 2)
+        let snapshot = try await metadata.directoryCache(profileID: try XCTUnwrap(model.session?.profileID), url: url)
+        XCTAssertEqual(snapshot?.entries, entries)
+        XCTAssertFalse(try XCTUnwrap(snapshot).isExpired())
+        XCTAssertEqual(model.rows.map(\.name), ["fresh.txt"])
+        XCTAssertFalse(model.canGoBack, "Background refresh must not add navigation history")
+        model.onChange = nil
+    }
+
+    func testBackgroundRefreshFailureKeepsExpiredCacheUsable() async throws {
+        let (model, client, metadata, url) = try await cachedPage(age: 26 * 60)
+        await client.waitForRequest(url)
+        let failed = expectation(description: "Nonblocking refresh warning")
+        model.onChange = { if model.noticeText?.contains("后台刷新失败") == true { failed.fulfill() } }
+        await client.resolve(url, result: .failure(.connectionTimedOut))
+        await fulfillment(of: [failed], timeout: 2)
+        XCTAssertEqual(model.state, .loaded(url))
+        XCTAssertFalse(model.isBusy)
+        XCTAssertEqual(model.rows.map(\.name), StabilitySVNClient.entries.map(\.name))
+        let snapshot = try await metadata.directoryCache(profileID: try XCTUnwrap(model.session?.profileID), url: url)
+        XCTAssertTrue(try XCTUnwrap(snapshot).isExpired())
+        model.onChange = nil
+    }
+
+    func testLateBackgroundRefreshCannotReplaceNewDirectory() async throws {
+        let (model, client, metadata, url) = try await cachedPage(age: 26 * 60)
+        let profileID = try XCTUnwrap(model.session?.profileID)
+        await client.waitForRequest(url)
+        let newURL = URL(string: "https://example.com/root")!
+        try await model.navigate(to: newURL)
+        await client.resolve(url, result: .success([]))
+        // Wait for the underlying shared cache update, not a guessed delay.
+        for _ in 0..<1000 {
+            if try await metadata.directoryCache(profileID: profileID, url: url)?.entries.isEmpty == true { break }
+            await Task.yield()
+        }
+        XCTAssertEqual(model.currentURL, newURL)
+        XCTAssertEqual(model.state, .loaded(newURL))
+        XCTAssertEqual(model.rows.map(\.name), StabilitySVNClient.entries.map(\.name))
+    }
+
+    func testExpandedDirectoriesShowExpiredRowsAndCoalesceBackgroundReads() async throws {
+        let metadata = RepositoryMetadataService(store: try RepositoryMetadataStore(inMemory: ()))
+        let client = ControlledListSVNClient()
+        let root = URL(string: "https://example.com/root")!
+        let child = URL(string: "https://example.com/root/expired")!
+        let profileID = UUID()
+        let session = RepositorySession(profileID: profileID, displayName: "Tree", baseURL: root, searchRootURL: root, options: .anonymous)
+        let first = BrowserViewModel(svnClient: client, metadataService: metadata)
+        let second = BrowserViewModel(svnClient: client, metadataService: metadata)
+        try await first.connect(session: session)
+        try await second.connect(session: session)
+        try await metadata.replaceDirectoryCache(profileID: profileID, url: child,
+            entries: StabilitySVNClient.entries, cachedAt: .now.addingTimeInterval(-26 * 60))
+        let updatedFirst = expectation(description: "First tree refreshed")
+        let updatedSecond = expectation(description: "Second tree refreshed")
+        first.onTreeDirectoryRefreshed = { url, rows in
+            XCTAssertEqual(url, child); XCTAssertTrue(rows.isEmpty); updatedFirst.fulfill()
+        }
+        second.onTreeDirectoryRefreshed = { url, rows in
+            XCTAssertEqual(url, child); XCTAssertTrue(rows.isEmpty); updatedSecond.fulfill()
+        }
+        let firstRows = try await first.rows(in: child)
+        let secondRows = try await second.rows(in: child)
+        _ = try await first.rows(in: child)
+        XCTAssertEqual(firstRows, secondRows)
+        XCTAssertFalse(firstRows.isEmpty)
+        await client.waitForRequest(child)
+        for _ in 0..<100 { await Task.yield() }
+        let count = await client.listCount(for: child)
+        XCTAssertEqual(count, 1)
+        await client.resolve(child, result: .success([]))
+        await fulfillment(of: [updatedFirst, updatedSecond], timeout: 2)
+        let snapshot = try await metadata.directoryCache(profileID: profileID, url: child)
+        XCTAssertTrue(try XCTUnwrap(snapshot).entries.isEmpty)
+    }
+
+    func testCacheInvalidationPreventsLateBackgroundResultFromResurrectingEntries() async throws {
+        try await assertBackgroundCacheReplacement(clearCache: true)
+    }
+
+    func testExplicitCacheReplacementWinsOverLateBackgroundResult() async throws {
+        try await assertBackgroundCacheReplacement(clearCache: false)
+    }
+
+    private func assertBackgroundCacheReplacement(clearCache: Bool) async throws {
+        let metadata = RepositoryMetadataService(store: try RepositoryMetadataStore(inMemory: ()))
+        let client = ControlledListSVNClient()
+        let url = URL(string: "https://example.com/background")!
+        let profileID = UUID()
+        let refresh = Task {
+            try await metadata.refreshDirectoryCache(profileID: profileID, url: url) {
+                try await client.list(url: url, options: .anonymous)
+            }
+        }
+        await client.waitForRequest(url)
+        if clearCache {
+            try await metadata.clearDirectoryCache(profileID: profileID)
+        } else {
+            try await metadata.replaceDirectoryCache(profileID: profileID, url: url, entries: StabilitySVNClient.entries)
+        }
+        await client.resolve(url, result: .success([]))
+        do { _ = try await refresh.value; XCTFail("Expected superseded background refresh cancellation") }
+        catch is CancellationError {}
+        let snapshot = try await metadata.directoryCache(profileID: profileID, url: url)
+        if clearCache { XCTAssertNil(snapshot) }
+        else { XCTAssertEqual(snapshot?.entries, StabilitySVNClient.entries) }
+    }
+
+    func testFailedServerSwitchClearsOldLocationAndDisablesWrites() async throws {
+        let client = StabilitySVNClient()
+        let model = BrowserViewModel(svnClient: client)
+        try await model.connect(to: URL(string: "https://example.com/root")!)
+        await client.setFailLists(true)
+        do {
+            try await model.connect(to: URL(string: "https://other.example/root")!)
+            XCTFail("Expected failure")
+        } catch SVNClientError.connectionTimedOut {}
+        XCTAssertNil(model.session)
+        XCTAssertNil(model.currentURL)
+        XCTAssertTrue(model.rows.isEmpty)
+        let controller = BrowserViewController(viewModel: model)
+        XCTAssertFalse(controller.canModifyRepository)
+        do {
+            _ = try await model.createDirectory(name: "wrong-target", message: "must not write")
+            XCTFail("Expected disconnected write rejection")
+        } catch SVNClientError.unsupportedOperation {}
+        let count = await client.writeCount
+        XCTAssertEqual(count, 0)
+    }
+
+    func testSupersededConnectionSuccessDoesNotOverwriteNewSession() async throws {
+        try await assertSupersededConnection(result: .success([]))
+    }
+
+    func testSupersededConnectionFailureDoesNotOverwriteNewSession() async throws {
+        try await assertSupersededConnection(result: .failure(.connectionTimedOut))
+    }
+
+    func testSupersededCancelledConnectionDoesNotRestoreOldState() async throws {
+        try await assertSupersededConnection(result: .success([]), cancelOld: true)
+    }
+
+    private func assertSupersededConnection(
+        result: Result<[SVNListEntry], SVNClientError>, cancelOld: Bool = false
+    ) async throws {
+        let client = ControlledListSVNClient()
+        let model = BrowserViewModel(svnClient: client)
+        let oldURL = URL(string: "https://old.example/slow")!
+        let newURL = URL(string: "https://new.example/fast")!
+        let old = Task { try await model.connect(to: oldURL) }
+        await client.waitForRequest(oldURL)
+        let new = Task { try await model.connect(to: newURL) }
+        await client.waitForRequest(newURL)
+        await client.resolve(newURL, result: .success(StabilitySVNClient.entries))
+        try await new.value
+        if cancelOld { old.cancel() }
+        await client.resolve(oldURL, result: result)
+        do { try await old.value; XCTFail("Expected obsolete request cancellation") }
+        catch is CancellationError {}
+        XCTAssertEqual(model.session?.baseURL, newURL)
+        XCTAssertEqual(model.currentURL, newURL)
+        XCTAssertEqual(model.state, .loaded(newURL))
+        XCTAssertEqual(model.rows.map(\.name), StabilitySVNClient.entries.map(\.name))
+        XCTAssertFalse(model.isBusy)
+    }
+
+    func testOldFailureCannotClearNewConnectionLoadingFlags() async throws {
+        let client = ControlledListSVNClient()
+        let model = BrowserViewModel(svnClient: client)
+        let oldURL = URL(string: "https://example.com/old")!
+        let newURL = URL(string: "https://example.com/new")!
+        let old = Task { try await model.connect(to: oldURL) }
+        await client.waitForRequest(oldURL)
+        let new = Task { try await model.connect(to: newURL) }
+        await client.waitForRequest(newURL)
+        await client.resolve(oldURL, result: .failure(.connectionTimedOut))
+        do { try await old.value; XCTFail("Expected obsolete cancellation") } catch is CancellationError {}
+        XCTAssertTrue(model.isBusy)
+        XCTAssertTrue(model.isCancellable)
+        XCTAssertEqual(model.state, .loading)
+        XCTAssertEqual(model.session?.baseURL, newURL)
+        await client.resolve(newURL, result: .success([]))
+        try await new.value
+    }
+
+    func testDisconnectPreventsPendingRequestFromResurrectingSession() async throws {
+        let client = ControlledListSVNClient()
+        let model = BrowserViewModel(svnClient: client)
+        let url = URL(string: "https://example.com/pending")!
+        let task = Task { try await model.connect(to: url) }
+        await client.waitForRequest(url)
+        model.disconnect(profileID: try XCTUnwrap(model.session?.profileID))
+        await client.resolve(url, result: .success(StabilitySVNClient.entries))
+        do { try await task.value; XCTFail("Expected obsolete cancellation") } catch is CancellationError {}
+        XCTAssertNil(model.session)
+        XCTAssertNil(model.currentURL)
+        XCTAssertEqual(model.state, .disconnected)
+        XCTAssertTrue(model.rows.isEmpty)
+    }
+
+    func testCancellingCurrentConnectionLeavesNoOldWriteTarget() async throws {
+        let client = ControlledListSVNClient()
+        let model = BrowserViewModel(svnClient: client)
+        try await model.connect(to: URL(string: "https://example.com/root")!)
+        let url = URL(string: "https://example.com/pending")!
+        let task = Task { try await model.connect(to: url) }
+        await client.waitForRequest(url)
+        task.cancel()
+        await client.resolve(url, result: .success([]))
+        do { try await task.value; XCTFail("Expected cancellation") } catch is CancellationError {}
+        XCTAssertNil(model.session)
+        XCTAssertNil(model.currentURL)
+        XCTAssertEqual(model.state, .disconnected)
+    }
+
+    func testOverlappingNavigationKeepsLatestDirectoryAndCorrectBackStack() async throws {
+        let client = ControlledListSVNClient()
+        let model = BrowserViewModel(svnClient: client)
+        let root = URL(string: "https://example.com/root")!
+        let oldURL = URL(string: "https://example.com/old")!
+        let newURL = URL(string: "https://example.com/new")!
+        try await model.connect(to: root)
+        let old = Task { try await model.navigate(to: oldURL) }
+        await client.waitForRequest(oldURL)
+        let new = Task { try await model.navigate(to: newURL) }
+        await client.waitForRequest(newURL)
+        await client.resolve(newURL, result: .success([]))
+        try await new.value
+        await client.resolve(oldURL, result: .success([]))
+        do { try await old.value; XCTFail("Expected obsolete cancellation") } catch is CancellationError {}
+        XCTAssertEqual(model.currentURL, newURL)
+        try await model.goBack()
+        XCTAssertEqual(model.currentURL, root)
+        XCTAssertFalse(model.canGoBack)
+    }
+
+    func testCreateReturnsCommittedRevisionEvenIfRefreshFails() async throws { try await assertCommittedWrite(.create) }
+
+    func testLatePostCommitRefreshFailureCannotClearNewDirectory() async throws {
+        let client = ControlledListSVNClient()
+        let model = BrowserViewModel(svnClient: client)
+        let initialURL = URL(string: "https://example.com/initial")!
+        let destination = URL(string: "https://example.com/destination")!
+        let connection = Task { try await model.connect(to: initialURL) }
+        await client.waitForRequest(initialURL)
+        await client.resolve(initialURL, result: .success(StabilitySVNClient.entries))
+        try await connection.value
+        let write = Task { try await model.createDirectory(name: "new", message: "new") }
+        await client.waitForRequest(initialURL)
+        let navigation = Task { try await model.navigate(to: destination) }
+        await client.waitForRequest(destination)
+        await client.resolve(destination, result: .success(StabilitySVNClient.entries))
+        try await navigation.value
+        await client.resolve(initialURL, result: .failure(.connectionTimedOut))
+        let result = try await write.value
+        XCTAssertEqual(result.revision, 42)
+        XCTAssertEqual(model.currentURL, destination)
+        XCTAssertEqual(model.state, .loaded(destination))
+        XCTAssertEqual(model.rows.map(\.name), StabilitySVNClient.entries.map(\.name))
+        XCTAssertFalse(model.isBusy)
+    }
+    func testRenameSyncsFavoritesEvenIfRefreshFails() async throws { try await assertCommittedWrite(.rename) }
+    func testDeleteMarksFavoritesUnavailableEvenIfRefreshFails() async throws { try await assertCommittedWrite(.delete) }
+    func testUploadReturnsCommittedRevisionEvenIfRefreshFails() async throws { try await assertCommittedWrite(.upload) }
+    func testReplaceReturnsCommittedRevisionEvenIfRefreshFails() async throws { try await assertCommittedWrite(.replace) }
+    func testRestoreReturnsCommittedRevisionEvenIfRefreshFails() async throws { try await assertCommittedWrite(.restore) }
+
+    private enum WriteCase { case create, rename, delete, upload, replace, restore }
+
+    private func assertCommittedWrite(_ operation: WriteCase) async throws {
+        let store = try RepositoryMetadataStore(inMemory: ())
+        let metadata = RepositoryMetadataService(store: store)
+        let client = StabilitySVNClient()
+        let model = BrowserViewModel(svnClient: client, metadataService: metadata)
+        try await model.connect(to: URL(string: "https://example.com/root")!)
+        let row = try XCTUnwrap(model.rows.first(where: { $0.kind == .file }))
+        _ = try await model.setFavorites([row], isFavorite: true)
+        await client.setFailLists(true)
+        let local = FileManager.default.temporaryDirectory.appendingPathComponent("local-\(UUID()).txt")
+        try Data("new".utf8).write(to: local)
+        defer { try? FileManager.default.removeItem(at: local) }
+        let result: SVNWriteResult
+        switch operation {
+        case .create: result = try await model.createDirectory(name: "new", message: "new")
+        case .rename: result = try await model.rename(row, to: "renamed.txt", message: "rename")
+        case .delete: result = try await model.delete(row, message: "delete")
+        case .upload: result = try await model.upload(files: [local], message: "upload")
+        case .replace: result = try await model.replace(row, with: local, message: "replace")
+        case .restore:
+            let history = BrowserFileHistory(profileID: try XCTUnwrap(model.session?.profileID),
+                sourceURL: row.url, displayName: row.name, currentRevision: 4, pegRevision: 9,
+                entries: [SVNLogEntry(revision: 2, author: nil, date: nil, message: "old")], options: .anonymous)
+            result = try await model.restore(history: history, revision: 2, message: "restore")
+        }
+        XCTAssertEqual(result.revision, 42)
+        let count = await client.writeCount
+        XCTAssertEqual(count, 1, "No automatic write retry after a read failure")
+        XCTAssertTrue(model.noticeText?.contains("r42") == true)
+        XCTAssertTrue(model.noticeText?.contains("已提交成功") == true)
+        XCTAssertTrue(model.noticeText?.contains("不要重复提交") == true)
+        XCTAssertTrue(model.rows.isEmpty, "Pre-commit rows must not remain actionable")
+        let favorites = try await metadata.favorites()
+        if operation == .rename {
+            XCTAssertEqual(favorites.first?.url.lastPathComponent, "renamed.txt")
+        } else if operation == .delete {
+            XCTAssertEqual(favorites.first?.isAvailable, false)
+        }
+    }
+
+    func testEditableOpenCopiesCannotContaminateHistoricalSnapshots() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("snapshot-test-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = StabilitySVNClient()
+        let model = BrowserViewModel(svnClient: client, cacheRootURL: root)
+        try await model.connect(to: URL(string: "https://example.com/root")!)
+        let row = try XCTUnwrap(model.rows.first(where: { $0.kind == .file }))
+        let history = BrowserFileHistory(profileID: try XCTUnwrap(model.session?.profileID),
+            sourceURL: row.url, displayName: row.name, currentRevision: 4, pegRevision: 9,
+            entries: [SVNLogEntry(revision: 4, author: nil, date: nil, message: "four")], options: .anonymous)
+        let firstCopy = try await model.localURLForOpening(row)
+        try Data("edited locally".utf8).write(to: firstCopy)
+        let snapshot = try await model.localSnapshotURL(history: history, revision: 4)
+        let secondCopy = try await model.localURLForOpening(history: history, revision: 4)
+        XCTAssertNotEqual(firstCopy, snapshot)
+        XCTAssertNotEqual(firstCopy, secondCopy)
+        XCTAssertEqual(try String(contentsOf: snapshot, encoding: .utf8), "r4")
+        XCTAssertEqual(try String(contentsOf: secondCopy, encoding: .utf8), "r4")
+        let permissions = try FileManager.default.attributesOfItem(atPath: snapshot.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o444)
+        let exports = await client.exportCount
+        XCTAssertEqual(exports, 1, "An immutable snapshot is still reusable")
+    }
+
+    func testSnapshotCacheIncludesFullSourceURLWhenProfileIsEdited() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("snapshot-host-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = StabilitySVNClient()
+        let model = BrowserViewModel(svnClient: client, cacheRootURL: root)
+        let profileID = UUID()
+        for host in ["first.example", "second.example"] {
+            let url = URL(string: "https://\(host)/root")!
+            try await model.connect(session: RepositorySession(profileID: profileID, displayName: host,
+                baseURL: url, searchRootURL: url, options: .anonymous))
+            _ = try await model.localSnapshotURL(for: try XCTUnwrap(model.rows.first(where: { $0.kind == .file })))
+        }
+        let exports = await client.exportCount
+        XCTAssertEqual(exports, 2, "Different hosts cannot reuse the same path/revision cache")
+    }
+
+    func testFinderPromisesExcludeSelectedDescendantsButKeepIndependentItems() async throws {
+        let model = BrowserViewModel(svnClient: StabilitySVNClient())
+        try await model.connect(to: URL(string: "https://example.com/root")!)
+        let controller = BrowserViewController(viewModel: model)
+        _ = controller.view
+        let scroll = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? NSScrollView }.first)
+        let outline = try XCTUnwrap(scroll.documentView as? NSOutlineView)
+        let parent = try XCTUnwrap(outline.item(atRow: 0))
+        outline.expandItem(parent)
+        for _ in 0..<1000 {
+            if let child = outline.item(atRow: 1),
+               (controller.outlineView(outline, viewFor: outline.tableColumns[0], item: child) as? NSTableCellView)?.textField?.stringValue == "child.txt" { break }
+            await Task.yield()
+        }
+        let child = try XCTUnwrap(outline.item(atRow: 1))
+        let peer = try XCTUnwrap(outline.item(atRow: 2))
+        let childName = (controller.outlineView(outline, viewFor: outline.tableColumns[0], item: child) as? NSTableCellView)?.textField?.stringValue
+        XCTAssertEqual(childName, "child.txt", "Child must be fully loaded, not a placeholder")
+        outline.selectRowIndexes(IndexSet([0, 1, 2]), byExtendingSelection: false)
+        XCTAssertNotNil(controller.outlineView(outline, pasteboardWriterForItem: parent))
+        XCTAssertNil(controller.outlineView(outline, pasteboardWriterForItem: child))
+        XCTAssertNotNil(controller.outlineView(outline, pasteboardWriterForItem: peer))
+        outline.selectRowIndexes(IndexSet([1]), byExtendingSelection: false)
+        XCTAssertNotNil(controller.outlineView(outline, pasteboardWriterForItem: child), "Child alone remains downloadable")
+    }
+
     func testConnectLoadsAndFormatsRepositoryEntries() async throws {
         let client = MockSVNClient(result: .success([
             SVNListEntry(
@@ -469,6 +996,87 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertEqual(replacedExpectedRevision, 9)
         XCTAssertEqual(replacedContents, "第四版内容")
         XCTAssertEqual(viewModel.noticeText, "已恢复 r4 的内容 · r13")
+    }
+}
+
+private actor ExpandedRefreshSVNClient: SVNClient {
+    private var updated = false
+    private(set) var counts: [String: Int] = [:]
+    func setUpdated() { updated = true }
+    func version() async throws -> String { "1.14.5" }
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        let name = url.lastPathComponent
+        counts[name, default: 0] += 1
+        func entry(_ name: String, _ kind: EntryKind) -> SVNListEntry {
+            SVNListEntry(name: name, kind: kind, size: nil, revision: updated ? 10 : 4, author: nil, updatedAt: nil)
+        }
+        switch name {
+        case "root": return [entry("expanded", .directory), entry("closed", .directory)]
+        case "expanded": return [entry("nested", .directory), entry("keep.txt", .file)]
+        case "nested": return [entry(updated ? "new-leaf.txt" : "old-leaf.txt", .file)]
+        default: return []
+        }
+    }
+}
+
+private actor ControlledListSVNClient: SVNClient {
+    private var pending: [URL: CheckedContinuation<[SVNListEntry], Error>] = [:]
+    private var listCounts: [URL: Int] = [:]
+    var totalListCount: Int { listCounts.values.reduce(0, +) }
+    func listCount(for url: URL) -> Int { listCounts[url, default: 0] }
+    func version() async throws -> String { "1.14.5" }
+    func makeDirectory(url: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
+        SVNWriteResult(revision: 42)
+    }
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        listCounts[url, default: 0] += 1
+        if url.lastPathComponent == "root" { return StabilitySVNClient.entries }
+        return try await withCheckedThrowingContinuation { pending[url] = $0 }
+    }
+    func waitForRequest(_ url: URL) async {
+        while pending[url] == nil { await Task.yield() }
+    }
+    func resolve(_ url: URL, result: Result<[SVNListEntry], SVNClientError>) {
+        guard let continuation = pending.removeValue(forKey: url) else { return }
+        switch result {
+        case .success(let entries): continuation.resume(returning: entries)
+        case .failure(let error): continuation.resume(throwing: error)
+        }
+    }
+}
+
+private actor StabilitySVNClient: SVNClient {
+    static let entries = [
+        SVNListEntry(name: "folder", kind: .directory, size: nil, revision: 4, author: nil, updatedAt: nil),
+        SVNListEntry(name: "file.txt", kind: .file, size: 10, revision: 4, author: nil, updatedAt: nil)
+    ]
+    private var failLists = false
+    private(set) var writeCount = 0
+    private(set) var exportCount = 0
+    func setFailLists(_ value: Bool) { failLists = value }
+    func version() async throws -> String { "1.14.5" }
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        if failLists { throw SVNClientError.connectionTimedOut }
+        if url.lastPathComponent == "folder" {
+            return [SVNListEntry(name: "child.txt", kind: .file, size: 10, revision: 4, author: nil, updatedAt: nil)]
+        }
+        return Self.entries
+    }
+    private func commit() -> SVNWriteResult {
+        writeCount += 1
+        return SVNWriteResult(revision: 42)
+    }
+    func makeDirectory(url: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult { commit() }
+    func move(from sourceURL: URL, to destinationURL: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult { commit() }
+    func delete(urls: [URL], message: String, options: SVNRequestOptions) async throws -> SVNWriteResult { commit() }
+    func upload(files: [URL], to directoryURL: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult { commit() }
+    func replace(localFileURL: URL, targetURL: URL, expectedRevision: Int, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult { commit() }
+    func export(url: URL, to destinationURL: URL, revision: Int?, overwrite: Bool, options: SVNRequestOptions) async throws {
+        exportCount += 1
+        try Data("r\(revision ?? 0)".utf8).write(to: destinationURL)
+    }
+    func exportHistoricalVersion(url: URL, pegRevision: Int, revision: Int, to destinationURL: URL, overwrite: Bool, options: SVNRequestOptions) async throws {
+        try await export(url: url, to: destinationURL, revision: revision, overwrite: overwrite, options: options)
     }
 }
 

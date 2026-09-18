@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 @MainActor
 final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMenuDelegate, @preconcurrency QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     var onNavigationStateChange: (() -> Void)?
+    var onCancelConnection: (() -> Void)?
 
     private let viewModel: BrowserViewModel
     private let breadcrumbStack = NSStackView()
@@ -43,6 +44,8 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private var renderedCurrentURL: URL?
     private var renderedSearchMode = false
     private var renderedTreeGeneration = 0
+    private var isRestoringTreeExpansion = false
+    private var expandedRefreshID: UUID?
 
     init(viewModel: BrowserViewModel) {
         self.viewModel = viewModel
@@ -73,6 +76,11 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         viewModel.onChange = { [weak self] in
             self?.render()
         }
+        viewModel.onTreeDirectoryRefreshed = { [weak self] url, rows in
+            guard let self, !self.viewModel.isShowingSearchResults,
+                  let node = self.treeNodeMap(self.rootNodes)[url.absoluteString] else { return }
+            self.updateChildren(rows, for: node)
+        }
         render()
     }
 
@@ -86,7 +94,26 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
 
     func navigateBack() { run { try await self.viewModel.goBack() } }
     func navigateForward() { run { try await self.viewModel.goForward() } }
-    func refreshRepository() { run { try await self.viewModel.refresh() } }
+    func refreshRepository() { run { try await self.refreshVisibleDirectories() } }
+
+    func refreshVisibleDirectories() async throws {
+        // Snapshot visible expanded folders only; remembered descendants of collapsed folders are excluded.
+        let expandedURLs = (0..<outlineView.numberOfRows).compactMap { index -> URL? in
+            guard let node = outlineView.item(atRow: index) as? BrowserTreeNode,
+                  node.row.kind == .directory, outlineView.isItemExpanded(node) else { return nil }
+            return node.row.url
+        }
+        childLoadTasks.values.forEach { $0.cancel() }
+        childLoadTasks.removeAll()
+        let id = UUID()
+        expandedRefreshID = id
+        defer { if expandedRefreshID == id { expandedRefreshID = nil } }
+        try await viewModel.refresh(expandedDirectoryURLs: expandedURLs) { [weak self] url in
+            guard let self, self.expandedRefreshID == id,
+                  let node = self.treeNodeMap(self.rootNodes)[url.absoluteString] else { return false }
+            return self.outlineView.row(forItem: node) >= 0 && self.outlineView.isItemExpanded(node)
+        }
+    }
     func createFolder() { promptForNewFolder() }
     func uploadFiles() { chooseFilesForUpload() }
     func refreshSearchIndex() { run { try await self.viewModel.refreshSearchIndex() } }
@@ -394,6 +421,9 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     }
 
     private func restoreExpandedState(in nodes: [BrowserTreeNode]) {
+        let wasRestoring = isRestoringTreeExpansion
+        isRestoringTreeExpansion = true
+        defer { isRestoringTreeExpansion = wasRestoring }
         for node in nodes where node.row.kind == .directory {
             guard expandedURLKeys.contains(node.row.url.absoluteString) else { continue }
             outlineView.expandItem(node)
@@ -416,10 +446,11 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
 
     private func loadChildren(for node: BrowserTreeNode, forceReload: Bool = false) {
         guard node.row.kind == .directory, !viewModel.isShowingSearchResults else { return }
-        if node.children != nil, !forceReload { return }
+        guard expandedRefreshID == nil else { return }
+        if isRestoringTreeExpansion, node.children != nil, !forceReload { return }
         let key = node.row.url.absoluteString
         guard childLoadTasks[key] == nil else { return }
-        node.isLoading = true
+        node.isLoading = node.children == nil
         node.errorMessage = nil
         outlineView.reloadItem(node, reloadChildren: true)
         let generation = viewModel.directoryTreeGeneration
@@ -431,11 +462,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
                 try Task.checkCancellation()
                 guard generation == self.viewModel.directoryTreeGeneration,
                       self.treeContains(node) else { return }
-                node.children = self.sortedTreeRows(rows).map(BrowserTreeNode.init)
-                node.isLoading = false
-                node.errorMessage = nil
-                self.outlineView.reloadItem(node, reloadChildren: true)
-                self.restoreExpandedState(in: node.children ?? [])
+                self.updateChildren(rows, for: node)
             } catch is CancellationError {
                 node.isLoading = false
             } catch {
@@ -445,6 +472,20 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
                 self.outlineView.reloadItem(node, reloadChildren: true)
             }
         }
+    }
+
+    private func updateChildren(_ rows: [BrowserRow], for node: BrowserTreeNode) {
+        let selectedURLs = Set(selectedNodes.map { $0.row.url })
+        let reusable = treeNodeMap(node.children ?? [])
+        node.children = sortedTreeRows(rows).map { row in
+            if let child = reusable[row.url.absoluteString] { child.row = row; return child }
+            return BrowserTreeNode(row: row)
+        }
+        node.isLoading = false
+        node.errorMessage = nil
+        outlineView.reloadItem(node, reloadChildren: true)
+        restoreExpandedState(in: node.children ?? [])
+        restoreSelection(urls: selectedURLs)
     }
 
     private func treeContains(_ target: BrowserTreeNode) -> Bool {
@@ -1011,8 +1052,8 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             controller?.setComparing(true)
             self.run { [weak controller] in
                 defer { controller?.setComparing(false) }
-                let original = try await self.viewModel.localURLForOpening(history: history, revision: originalRevision)
-                let revised = try await self.viewModel.localURLForOpening(history: history, revision: revisedRevision)
+                let original = try await self.viewModel.localSnapshotURL(history: history, revision: originalRevision)
+                let revised = try await self.viewModel.localSnapshotURL(history: history, revision: revisedRevision)
                 let result = try await WordDiffService().compare(original: original, revised: revised)
                 self.wordDiffWindowController?.close()
                 self.wordDiffWindowController = WordDiffWindowController(result: result,
@@ -1031,7 +1072,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             controller?.setComparing(true)
             self.run { [weak controller] in
                 defer { controller?.setComparing(false) }
-                let original = try await self.viewModel.localURLForOpening(history: history, revision: entry.revision)
+                let original = try await self.viewModel.localSnapshotURL(history: history, revision: entry.revision)
                 let result = try await WordDiffService().compare(original: original, revised: fileURL)
                 self.wordDiffWindowController?.close()
                 self.wordDiffWindowController = WordDiffWindowController(result: result,
@@ -1237,6 +1278,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     }
 
     @objc private func cancelCurrentActivity() {
+        onCancelConnection?()
         operationTask?.cancel()
         searchTask?.cancel()
         quickLookTask?.cancel()
@@ -1477,6 +1519,8 @@ extension BrowserViewController: NSOutlineViewDataSource {
 
     func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> (any NSPasteboardWriting)? {
         guard !viewModel.isBusy, let node = item as? BrowserTreeNode else { return nil }
+        if selectedNodes.contains(where: { $0 === node }),
+           !effectiveSelectedNodes.contains(where: { $0 === node }) { return nil }
         let browserRow = node.row
         guard let downloadRequest = viewModel.downloadRequest(for: browserRow) else { return nil }
         let fileType = browserRow.kind == .directory

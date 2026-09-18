@@ -8,6 +8,8 @@ final class MainCoordinator {
     private let metadataService: RepositoryMetadataService
     private weak var sidebarViewController: SidebarViewController?
     private weak var browserViewModel: BrowserViewModel?
+    private var connectionTask: Task<Void, Never>?
+    private var connectionRequestID = UUID()
 
     var activeTransferCount: Int {
         browserViewModel?.activeTransferCount ?? 0
@@ -44,10 +46,14 @@ final class MainCoordinator {
         browserViewModel.onRepositoryChanged = { [weak sidebarViewController] profileID, url in
             sidebarViewController?.invalidateDirectory(profileID: profileID, url: url)
         }
+        browserViewModel.onDirectoryCacheRefreshed = { [weak sidebarViewController] profileID, url, snapshot in
+            sidebarViewController?.updateDirectory(profileID: profileID, url: url, entries: snapshot.entries)
+        }
         browserViewModel.onMetadataChanged = { [weak self] in
             Task { await self?.reloadMetadata() }
         }
         let browserViewController = BrowserViewController(viewModel: browserViewModel)
+        browserViewController.onCancelConnection = { [weak self] in self?.connectionTask?.cancel() }
         let windowController = MainWindowController(
             sidebarViewController: sidebarViewController,
             browserViewController: browserViewController
@@ -62,12 +68,27 @@ final class MainCoordinator {
         sidebarViewController.onSelectDirectory = { [weak self] profileID, url in
             self?.connect(profileID: profileID, initialURL: url)
         }
-        sidebarViewController.onLoadDirectories = { [weak self] profileID, url in
+        sidebarViewController.onLoadDirectories = { [weak self, weak sidebarViewController] profileID, url in
             guard let self,
                   let connection = try await profileService.connection(profileID: profileID) else { return [] }
             let entries: [SVNListEntry]
             if let snapshot = try? await metadataService.directoryCache(profileID: profileID, url: url) {
                 entries = snapshot.entries
+                if snapshot.isExpired() {
+                    let metadataService = metadataService
+                    let svnClient = svnClient
+                    Task { @MainActor [weak sidebarViewController] in
+                        do {
+                            let updated = try await metadataService.refreshDirectoryCache(profileID: profileID, url: url) {
+                                try await svnClient.list(url: url, options: connection.requestOptions)
+                            }
+                            guard try await metadataService.directoryCache(profileID: profileID, url: url) == updated else { return }
+                            sidebarViewController?.updateDirectory(profileID: profileID, url: url, entries: updated.entries)
+                        } catch {
+                            // Keep usable cached directories when background revalidation fails.
+                        }
+                    }
+                }
             } else {
                 entries = try await svnClient.list(url: url, options: connection.requestOptions)
                 try? await metadataService.replaceDirectoryCache(profileID: profileID, url: url, entries: entries)
@@ -159,6 +180,8 @@ final class MainCoordinator {
         }
         connectionViewController.onSave = { [weak self, weak parentWindow, weak sheetWindow, weak browserViewModel] draft in
             guard let self, let browserViewModel else { return }
+            connectionRequestID = UUID()
+            connectionTask?.cancel()
             let now = Date()
             let profile = RepositoryProfile(
                 id: existingConnection?.profile.id ?? UUID(),
@@ -207,6 +230,8 @@ final class MainCoordinator {
                 alert.addButton(withTitle: "取消")
                 alert.buttons.first?.hasDestructiveAction = true
                 guard alert.runModal() == .alertFirstButtonReturn else { return }
+                connectionRequestID = UUID()
+                connectionTask?.cancel()
                 try await profileService.delete(profileID: profileID)
                 try await metadataService.deleteMetadata(profileID: profileID)
                 browserViewModel?.disconnect(profileID: profileID)
@@ -237,18 +262,27 @@ final class MainCoordinator {
     }
 
     private func connect(profileID: UUID, initialURL: URL? = nil) {
-        Task { [weak self] in
+        connectionTask?.cancel()
+        let requestID = UUID()
+        connectionRequestID = requestID
+        connectionTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if requestID == connectionRequestID { connectionTask = nil } }
             do {
-                guard let self,
-                      let connection = try await profileService.connection(profileID: profileID),
+                guard let connection = try await profileService.connection(profileID: profileID),
                       let browserViewModel else { return }
+                try Task.checkCancellation()
+                guard requestID == connectionRequestID else { return }
                 try await browserViewModel.connect(
                     profile: connection.profile,
                     password: connection.password,
                     initialURL: initialURL
                 )
+            } catch is CancellationError {
+                // A newer sidebar selection or the cancellation button superseded this connection.
             } catch {
-                self?.presentError(title: "无法连接服务器", error: error)
+                guard requestID == connectionRequestID else { return }
+                presentError(title: "无法连接服务器", error: error)
             }
         }
     }
@@ -261,12 +295,20 @@ final class MainCoordinator {
         revision: Int?,
         favoriteID: UUID?
     ) {
-        Task { [weak self] in
+        connectionTask?.cancel()
+        let requestID = UUID()
+        connectionRequestID = requestID
+        connectionTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if requestID == connectionRequestID { connectionTask = nil } }
             do {
-                guard let self,
-                      let connection = try await profileService.connection(profileID: profileID),
+                guard let connection = try await profileService.connection(profileID: profileID),
                       let browserViewModel else { return }
+                try Task.checkCancellation()
+                guard requestID == connectionRequestID else { return }
                 let info = try await svnClient.info(url: url, options: connection.requestOptions)
+                try Task.checkCancellation()
+                guard requestID == connectionRequestID else { return }
                 if let favoriteID {
                     try await metadataService.setFavoriteAvailability(
                         id: favoriteID,
@@ -274,6 +316,8 @@ final class MainCoordinator {
                         revision: info.lastChangedRevision ?? revision
                     )
                 }
+                try Task.checkCancellation()
+                guard requestID == connectionRequestID else { return }
                 if kind == .directory {
                     try await browserViewModel.connect(
                         profile: connection.profile,
@@ -290,21 +334,27 @@ final class MainCoordinator {
                         throw SavedItemError.notFound
                     }
                     let localURL = try await browserViewModel.localURLForOpening(row)
+                    try Task.checkCancellation()
+                    guard requestID == connectionRequestID else { return }
                     guard NSWorkspace.shared.open(localURL) else {
                         throw SavedItemError.noApplication
                     }
                 }
                 await reloadMetadata()
+            } catch is CancellationError {
+                // Superseded selections must not open a file or update the active browser.
             } catch {
+                guard requestID == connectionRequestID else { return }
                 if let favoriteID, Self.isMissingItem(error) {
-                    try? await self?.metadataService.setFavoriteAvailability(
+                    try? await metadataService.setFavoriteAvailability(
                         id: favoriteID,
                         isAvailable: false,
                         revision: nil
                     )
-                    await self?.reloadMetadata()
+                    await reloadMetadata()
                 }
-                self?.presentError(title: "无法打开“\(name)”", error: error)
+                guard requestID == connectionRequestID, !Task.isCancelled else { return }
+                presentError(title: "无法打开“\(name)”", error: error)
             }
         }
     }

@@ -9,6 +9,7 @@ struct RepositoryFavoriteCandidate: Equatable, Sendable {
 
 actor RepositoryMetadataService {
     private let store: any RepositoryMetadataStoring
+    private var directoryRefreshes: [String: (id: UUID, task: Task<DirectoryCacheSnapshot, Error>)] = [:]
 
     init(store: any RepositoryMetadataStoring) {
         self.store = store
@@ -132,6 +133,7 @@ actor RepositoryMetadataService {
         entries: [SVNListEntry],
         cachedAt: Date = .now
     ) async throws {
+        cancelDirectoryRefresh(profileID: profileID, url: url)
         try await store.replaceDirectoryCache(
             profileID: profileID,
             url: url,
@@ -141,10 +143,46 @@ actor RepositoryMetadataService {
     }
 
     func clearDirectoryCache(profileID: UUID) async throws {
+        cancelDirectoryRefreshes(profileID: profileID)
         try await store.clearDirectoryCache(profileID: profileID)
     }
 
+    // Coalesce background reads shared by the sidebar, the page and expanded folders.
+    func refreshDirectoryCache(
+        profileID: UUID, url: URL,
+        loader: @escaping @Sendable () async throws -> [SVNListEntry]
+    ) async throws -> DirectoryCacheSnapshot {
+        let key = profileID.uuidString + ":" + url.absoluteString
+        if let refresh = directoryRefreshes[key] { return try await refresh.task.value }
+        let id = UUID()
+        let store = store
+        let task = Task {
+            let entries = try await loader()
+            try Task.checkCancellation()
+            let snapshot = DirectoryCacheSnapshot(entries: entries, cachedAt: .now)
+            try await store.replaceDirectoryCache(profileID: profileID, url: url,
+                entries: entries, cachedAt: snapshot.cachedAt)
+            try Task.checkCancellation()
+            return snapshot
+        }
+        directoryRefreshes[key] = (id, task)
+        defer { if directoryRefreshes[key]?.id == id { directoryRefreshes.removeValue(forKey: key) } }
+        return try await task.value
+    }
+
+    private func cancelDirectoryRefresh(profileID: UUID, url: URL) {
+        let key = profileID.uuidString + ":" + url.absoluteString
+        directoryRefreshes.removeValue(forKey: key)?.task.cancel()
+    }
+
+    private func cancelDirectoryRefreshes(profileID: UUID) {
+        for key in Array(directoryRefreshes.keys) where key.hasPrefix(profileID.uuidString + ":") {
+            directoryRefreshes.removeValue(forKey: key)?.task.cancel()
+        }
+    }
+
     func deleteMetadata(profileID: UUID) async throws {
+        cancelDirectoryRefreshes(profileID: profileID)
         try await store.deleteMetadata(profileID: profileID)
     }
 }

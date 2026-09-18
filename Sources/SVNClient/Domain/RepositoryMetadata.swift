@@ -43,6 +43,11 @@ struct RepositorySearchResults: Equatable, Sendable {
 }
 
 struct DirectoryCacheSnapshot: Equatable, Sendable {
+    static let timeToLive: TimeInterval = 25 * 60
     let entries: [SVNListEntry]
     let cachedAt: Date
+
+    func isExpired(at date: Date = .now) -> Bool {
+        date.timeIntervalSince(cachedAt) >= Self.timeToLive
+    }
 }

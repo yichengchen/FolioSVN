@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XMLCoder
 
 protocol SVNClient: Sendable {
@@ -479,7 +480,16 @@ final class SVNCLIGateway: SVNClient, Sendable {
             options: options
         )
 
-        if fileManager.fileExists(atPath: destinationURL.path) {
+        try Task.checkCancellation()
+        if !overwrite {
+            // Both paths are siblings. RENAME_EXCL atomically refuses an existing target,
+            // including one created after export began (a second existence check is not enough).
+            if renameatx_np(AT_FDCWD, partialURL.path, AT_FDCWD, destinationURL.path, UInt32(RENAME_EXCL)) != 0 {
+                let code = errno
+                if code == EEXIST { throw SVNClientError.destinationExists }
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+            }
+        } else if fileManager.fileExists(atPath: destinationURL.path) {
             _ = try fileManager.replaceItemAt(destinationURL, withItemAt: partialURL)
         } else {
             try fileManager.moveItem(at: partialURL, to: destinationURL)

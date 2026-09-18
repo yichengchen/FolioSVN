@@ -8,4 +8,9 @@ Vendor/WordDiffRuntime/*
 *.xcuserstate
 xcuserdata/
 
+# Signing certificates and App Store Connect private keys must stay out of Git.
+*.p12
+*.pfx
+*.p8
+
 test-svn/repos

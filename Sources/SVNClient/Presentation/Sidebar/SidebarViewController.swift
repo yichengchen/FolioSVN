@@ -244,6 +244,31 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
         }
     }
 
+    func updateDirectory(profileID: UUID, url: URL, entries: [SVNListEntry]) {
+        guard let item = findItem(where: {
+            $0.repositoryLocation?.profileID == profileID && $0.repositoryLocation?.url == url
+        }) else { return }
+        applyDirectories(entries.filter { $0.kind == .directory }.map {
+            (name: $0.name, url: url.appendingPathComponent($0.name, isDirectory: true))
+        }, to: item, profileID: profileID)
+    }
+
+    private func applyDirectories(_ directories: [(name: String, url: URL)], to item: SidebarItem, profileID: UUID) {
+        let oldChildren = item.children
+        item.children = directories.isEmpty
+            ? [SidebarItem("没有子文件夹", symbolName: "folder", kind: .emptyState)]
+            : directories.map { directory in
+                if let existing = oldChildren.first(where: { $0.repositoryLocation?.url == directory.url && $0.title == directory.name }) {
+                    return existing
+                }
+                return SidebarItem(directory.name, symbolName: "folder",
+                    children: [SidebarItem.loadingPlaceholder()], kind: .directory(profileID, directory.url), hasLoadedChildren: false)
+            }
+        item.hasLoadedChildren = true
+        outlineView.reloadItem(item, reloadChildren: true)
+        restoreOutlineState()
+    }
+
     private func restoreOutlineState() {
         isRestoringState = true
         restoreExpansion(in: rootNodes)
@@ -356,6 +381,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
 
     func outlineViewItemWillExpand(_ notification: Notification) {
         guard let item = notification.userInfo?["NSObject"] as? SidebarItem else { return }
+        if isRestoringState && item.hasLoadedChildren { return }
         loadDirectoryChildren(for: item)
     }
 
@@ -374,8 +400,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
     }
 
     private func loadDirectoryChildren(for item: SidebarItem) {
-        guard !item.hasLoadedChildren,
-              !item.isLoadingChildren,
+        guard !item.isLoadingChildren,
               let location = item.repositoryLocation,
               let onLoadDirectories else { return }
         item.isLoadingChildren = true
@@ -383,18 +408,8 @@ extension SidebarViewController: NSOutlineViewDelegate {
             guard let self, let item else { return }
             do {
                 let directories = try await onLoadDirectories(location.profileID, location.url)
-                item.children = directories.isEmpty
-                    ? [SidebarItem("没有子文件夹", symbolName: "folder", kind: .emptyState)]
-                    : directories.map { directory in
-                        SidebarItem(
-                            directory.name,
-                            symbolName: "folder",
-                            children: [SidebarItem.loadingPlaceholder()],
-                            kind: .directory(location.profileID, directory.url),
-                            hasLoadedChildren: false
-                        )
-                    }
-                item.hasLoadedChildren = true
+                guard self.findItem(where: { $0 === item }) != nil else { return }
+                self.applyDirectories(directories, to: item, profileID: location.profileID)
             } catch {
                 item.children = [SidebarItem("无法读取", subtitle: error.localizedDescription, symbolName: "exclamationmark.triangle", kind: .emptyState)]
             }
