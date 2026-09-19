@@ -187,7 +187,7 @@ final class MainCoordinator {
             _ = try await self.svnClient.list(url: draft.startURL, options: draft.requestOptions)
             try Task.checkCancellation()
         }
-        connectionViewController.onSave = { [weak self, weak parentWindow, weak sheetWindow, weak browserViewModel] draft in
+        connectionViewController.onSave = { [weak self, weak parentWindow, weak sheetWindow, weak browserViewModel, weak connectionViewController] draft in
             guard let self, let browserViewModel else { return }
             connectionRequestID = UUID()
             connectionTask?.cancel()
@@ -202,16 +202,18 @@ final class MainCoordinator {
                 createdAt: existingConnection?.profile.createdAt ?? now,
                 updatedAt: now
             )
-            _ = try await self.svnClient.list(url: profile.startURL, options: draft.requestOptions)
+            let entries = try await self.svnClient.list(url: profile.startURL, options: draft.requestOptions)
             try Task.checkCancellation()
+            connectionViewController?.beginFinalizingSave()
             // The profile ID survives edits, but its credentials and visible tree may not.
             // Reconnecting must never reuse directory or search data read by the old account.
             try await self.metadataService.clearRepositoryCache(profileID: profile.id)
-            try Task.checkCancellation()
             try await self.profileService.save(profile: profile, password: draft.password)
-            try Task.checkCancellation()
-            try await browserViewModel.connect(profile: profile, password: draft.password)
-            try Task.checkCancellation()
+            try await browserViewModel.connect(
+                profile: profile,
+                password: draft.password,
+                prefetchedEntries: entries
+            )
             await self.reloadRepositoryProfiles()
             guard let parentWindow, let sheetWindow else { return }
             parentWindow.endSheet(sheetWindow)

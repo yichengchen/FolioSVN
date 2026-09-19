@@ -332,17 +332,26 @@ final class BrowserViewModel {
         ))
     }
 
-    func connect(profile: RepositoryProfile, password: String?, initialURL: URL? = nil) async throws {
+    func connect(
+        profile: RepositoryProfile,
+        password: String?,
+        initialURL: URL? = nil,
+        prefetchedEntries: [SVNListEntry]? = nil
+    ) async throws {
         let connection = RepositoryConnection(profile: profile, password: password)
         try await connect(session: RepositorySession(
             profileID: profile.id,
             displayName: profile.displayName,
             baseURL: profile.baseURL,
             options: connection.requestOptions
-        ), initialURL: initialURL ?? profile.startURL)
+        ), initialURL: initialURL ?? profile.startURL, prefetchedEntries: prefetchedEntries)
     }
 
-    func connect(session: RepositorySession, initialURL: URL? = nil) async throws {
+    func connect(
+        session: RepositorySession,
+        initialURL: URL? = nil,
+        prefetchedEntries: [SVNListEntry]? = nil
+    ) async throws {
         cancelBackgroundDirectoryTasks()
         cancelSearchIndexRefreshTasks()
         sessionGeneration = UUID()
@@ -364,7 +373,21 @@ final class BrowserViewModel {
         backStack = []
         forwardStack = []
         do {
-            try await load(url: initialURL ?? session.baseURL, clearRows: true, policy: .preferCache)
+            let destinationURL = initialURL ?? session.baseURL
+            if let prefetchedEntries {
+                try Task.checkCancellation()
+                let snapshot = DirectoryCacheSnapshot(entries: prefetchedEntries, cachedAt: .now)
+                applyDirectoryEntries(snapshot.entries, url: destinationURL, cachedAt: snapshot.cachedAt)
+                try? await metadataService?.replaceDirectoryCache(
+                    profileID: session.profileID,
+                    url: destinationURL,
+                    entries: snapshot.entries,
+                    cachedAt: snapshot.cachedAt
+                )
+                onDirectoryCacheRefreshed?(session.profileID, destinationURL, snapshot)
+            } else {
+                try await load(url: destinationURL, clearRows: true, policy: .preferCache)
+            }
             try? await reloadFavorites()
             try Task.checkCancellation()
             guard generation == sessionGeneration else { throw CancellationError() }
@@ -1466,8 +1489,8 @@ final class BrowserViewModel {
         let previousDirectoryRequestID = directoryRequestID
         var warnings: [String] = []
         do { try await metadataUpdate() } catch { warnings.append("收藏同步失败") }
-        do { try await metadataService?.clearDirectoryCache(profileID: profileID) }
-        catch { warnings.append("本地目录缓存清理失败") }
+        do { try await metadataService?.clearRepositoryCache(profileID: profileID) }
+        catch { warnings.append("本地缓存清理失败") }
         if updatesMetadata { onMetadataChanged?() }
         guard generation == sessionGeneration, session?.profileID == profileID else { return }
         directoryTreeGeneration += 1

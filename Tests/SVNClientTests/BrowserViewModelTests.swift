@@ -127,6 +127,67 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertTrue(snapshot.isExpired(at: date.addingTimeInterval(1501)))
     }
 
+    func testPrefetchedConnectionUsesValidatedEntriesWithoutASecondServerRead() async throws {
+        let metadata = RepositoryMetadataService(store: try RepositoryMetadataStore(inMemory: ()))
+        let client = MockSVNClient(result: .failure(.connectionTimedOut))
+        let model = BrowserViewModel(svnClient: client, metadataService: metadata)
+        let root = try XCTUnwrap(URL(string: "https://example.com/root"))
+        let profile = RepositoryProfile(
+            id: UUID(), displayName: "Validated", baseURL: root, username: "",
+            certificatePolicy: .strict, createdAt: .now, updatedAt: .now
+        )
+
+        try await model.connect(
+            profile: profile,
+            password: nil,
+            prefetchedEntries: StabilitySVNClient.entries
+        )
+
+        XCTAssertEqual(model.currentURL, root)
+        XCTAssertEqual(model.rows.map(\.name), StabilitySVNClient.entries.map(\.name))
+        let cached = try await metadata.directoryCache(profileID: profile.id, url: root)
+        XCTAssertEqual(cached?.entries, StabilitySVNClient.entries)
+    }
+
+    func testSuccessfulWriteInvalidatesSearchIndex() async throws {
+        let metadata = RepositoryMetadataService(store: try RepositoryMetadataStore(inMemory: ()))
+        let client = StabilitySVNClient()
+        let model = BrowserViewModel(svnClient: client, metadataService: metadata)
+        let root = try XCTUnwrap(URL(string: "https://example.com/root"))
+        let profile = RepositoryProfile(
+            id: UUID(), displayName: "Repository", baseURL: root, username: "",
+            certificatePolicy: .strict, createdAt: .now, updatedAt: .now
+        )
+        try await model.connect(profile: profile, password: nil)
+        try await metadata.replaceSearchIndex(
+            profileID: profile.id,
+            rootURL: root,
+            entries: [SearchIndexEntry(
+                profileID: profile.id,
+                rootURL: root,
+                url: root.appendingPathComponent("stale.txt"),
+                name: "stale.txt",
+                kind: .file,
+                size: 1,
+                revision: 1,
+                author: nil,
+                modifiedAt: nil
+            )],
+            indexedAt: .now
+        )
+
+        _ = try await model.createDirectory(name: "new", message: "create")
+
+        let results = try await metadata.search(
+            profileID: profile.id,
+            rootURL: root,
+            directoryURL: nil,
+            query: "stale"
+        )
+        XCTAssertTrue(results.entries.isEmpty)
+        XCTAssertNil(results.indexedAt)
+    }
+
     private func cachedPage(age: TimeInterval) async throws -> (BrowserViewModel, ControlledListSVNClient, RepositoryMetadataService, URL) {
         let metadata = RepositoryMetadataService(store: try RepositoryMetadataStore(inMemory: ()))
         let client = ControlledListSVNClient()

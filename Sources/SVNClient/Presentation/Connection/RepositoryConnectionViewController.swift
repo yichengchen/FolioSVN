@@ -48,6 +48,7 @@ final class RepositoryConnectionViewController: NSViewController {
     private let existingPassword: String?
     private var operationTask: Task<Void, Never>?
     private var operationID: UUID?
+    private var operationAllowsCancellation = true
 
     init(profile: RepositoryProfile? = nil, password: String? = nil) {
         existingProfile = profile
@@ -192,6 +193,7 @@ final class RepositoryConnectionViewController: NSViewController {
 
     @objc private func cancel() {
         if let operationTask {
+            guard operationAllowsCancellation else { return }
             operationTask.cancel()
             cancelButton.isEnabled = false
             showStatus("正在取消连接…", color: .secondaryLabelColor)
@@ -218,6 +220,7 @@ final class RepositoryConnectionViewController: NSViewController {
         operationTask?.cancel()
         let id = UUID()
         operationID = id
+        operationAllowsCancellation = true
         setLoading(true)
         operationTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -245,6 +248,14 @@ final class RepositoryConnectionViewController: NSViewController {
                 setLoading(false)
             }
         }
+    }
+
+    func beginFinalizingSave() {
+        guard operationTask != nil else { return }
+        operationAllowsCancellation = false
+        cancelButton.isEnabled = false
+        cancelButton.title = "正在保存…"
+        showStatus("连接成功，正在保存服务器配置…", color: .secondaryLabelColor)
     }
 
     private func validatedDraft() -> RepositoryProfileDraft? {
@@ -312,8 +323,14 @@ final class RepositoryConnectionViewController: NSViewController {
         for control in [nameField, urlField, usernameField, passwordField, startPathField, certificatePopup] {
             control.isEnabled = !isLoading
         }
-        cancelButton.isEnabled = true
-        cancelButton.title = isLoading ? "取消连接" : "取消"
+        if isLoading {
+            cancelButton.isEnabled = operationAllowsCancellation
+            cancelButton.title = operationAllowsCancellation ? "取消连接" : "正在保存…"
+        } else {
+            operationAllowsCancellation = true
+            cancelButton.isEnabled = true
+            cancelButton.title = "取消"
+        }
         testButton.isEnabled = !isLoading
         saveButton.isEnabled = !isLoading
         isLoading ? progressIndicator.startAnimation(nil) : progressIndicator.stopAnimation(nil)
