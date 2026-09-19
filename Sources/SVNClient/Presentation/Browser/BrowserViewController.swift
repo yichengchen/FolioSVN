@@ -13,6 +13,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private let statusLabel = NSTextField(labelWithString: "")
     private let progressIndicator = NSProgressIndicator()
     private let cancelActivityButton = NSButton(title: "取消", target: nil, action: nil)
+    private let openDocumentsButton = NSButton(title: "待上传", target: nil, action: nil)
     private let transferButton = NSButton(title: "传输", target: nil, action: nil)
     private let emptyStateLabel = NSTextField(wrappingLabelWithString: "")
     private let scrollView = NSScrollView()
@@ -20,6 +21,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private var openMenuItem: NSMenuItem?
     private var downloadMenuItem: NSMenuItem?
     private var replaceMenuItem: NSMenuItem?
+    private var resetLocalChangesMenuItem: NSMenuItem?
     private var renameMenuItem: NSMenuItem?
     private var deleteMenuItem: NSMenuItem?
     private var historyMenuItem: NSMenuItem?
@@ -45,8 +47,11 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private var renderedCurrentURL: URL?
     private var renderedSearchMode = false
     private var renderedTreeGeneration = 0
+    private var renderedModifiedURLKeys: Set<String> = []
     private var isRestoringTreeExpansion = false
     private var expandedRefreshID: UUID?
+    private var isReviewingOpenDocumentChanges = false
+    private var lastPromptedOpenDocumentSignatures: [UUID: String] = [:]
 
     init(viewModel: BrowserViewModel) {
         self.viewModel = viewModel
@@ -182,6 +187,11 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         openMenuItem = menu.addItem(withTitle: "打开", action: #selector(openSelectedItem), keyEquivalent: "")
         downloadMenuItem = menu.addItem(withTitle: "下载…", action: #selector(downloadSelectedItem), keyEquivalent: "")
         replaceMenuItem = menu.addItem(withTitle: "替换…", action: #selector(replaceSelectedItem), keyEquivalent: "")
+        resetLocalChangesMenuItem = menu.addItem(
+            withTitle: "重置（放弃修改）…",
+            action: #selector(resetSelectedLocalChanges),
+            keyEquivalent: ""
+        )
         let uploadHere = menu.addItem(withTitle: "上传到这里…", action: #selector(uploadToSelectedFolder), keyEquivalent: "")
         uploadHereMenuItem = uploadHere
         let newFolderHere = menu.addItem(withTitle: "在这里新建文件夹…", action: #selector(createFolderInSelectedFolder), keyEquivalent: "")
@@ -206,6 +216,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
 
     func menuWillOpen(_ menu: NSMenu) {
         guard menu === outlineView.menu else { return }
+        resetLocalChangesMenuItem?.isHidden = true
         if let event = NSApp.currentEvent, event.window === view.window {
             let point = outlineView.convert(event.locationInWindow, from: nil)
             let clickedRow = outlineView.row(at: point)
@@ -227,6 +238,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         let isSingleSelection = rows.count == 1
         openMenuItem?.isHidden = !isSingleSelection
         replaceMenuItem?.isHidden = !isSingleSelection
+        resetLocalChangesMenuItem?.isHidden = !isSingleSelection || !viewModel.hasLocalChanges(for: rows[0])
         renameMenuItem?.isHidden = !isSingleSelection
         historyMenuItem?.isHidden = !isSingleSelection
         infoMenuItem?.isHidden = !isSingleSelection
@@ -269,6 +281,17 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         transferButton.imagePosition = .imageLeading
         transferButton.target = self
         transferButton.action = #selector(showTransferTasks)
+        openDocumentsButton.bezelStyle = .inline
+        openDocumentsButton.controlSize = .small
+        openDocumentsButton.image = NSImage(
+            systemSymbolName: "doc.badge.ellipsis",
+            accessibilityDescription: "待上传的本地修改"
+        )
+        openDocumentsButton.imagePosition = .imageLeading
+        openDocumentsButton.toolTip = "检查在其他应用中编辑、尚未上传到 SVN 的文件"
+        openDocumentsButton.target = self
+        openDocumentsButton.action = #selector(reviewOpenDocumentChanges)
+        openDocumentsButton.isHidden = true
 
         emptyStateLabel.alignment = .center
         emptyStateLabel.font = .systemFont(ofSize: 15, weight: .medium)
@@ -283,6 +306,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         statusBar.addSubview(statusDivider)
         statusBar.addSubview(progressIndicator)
         statusBar.addSubview(statusLabel)
+        statusBar.addSubview(openDocumentsButton)
         statusBar.addSubview(transferButton)
         statusBar.addSubview(cancelActivityButton)
 
@@ -322,7 +346,11 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         statusLabel.snp.makeConstraints {
             $0.leading.equalTo(progressIndicator.snp.trailing).offset(7)
             $0.centerY.equalToSuperview()
-            $0.trailing.lessThanOrEqualTo(transferButton.snp.leading).offset(-8)
+            $0.trailing.lessThanOrEqualTo(openDocumentsButton.snp.leading).offset(-8)
+        }
+        openDocumentsButton.snp.makeConstraints {
+            $0.trailing.equalTo(transferButton.snp.leading).offset(-4)
+            $0.centerY.equalToSuperview()
         }
         transferButton.snp.makeConstraints {
             $0.trailing.equalTo(cancelActivityButton.snp.leading).offset(-4)
@@ -336,12 +364,16 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
 
     private func render() {
         statusLabel.stringValue = viewModel.statusText
+        let modifiedDocumentCount = viewModel.modifiedOpenDocuments.count
+        openDocumentsButton.title = "待上传（\(modifiedDocumentCount)）"
+        openDocumentsButton.isHidden = modifiedDocumentCount == 0
         transferButton.title = viewModel.activeTransferCount > 0
             ? "传输（\(viewModel.activeTransferCount)）"
             : "传输"
         viewModel.isBusy ? progressIndicator.startAnimation(nil) : progressIndicator.stopAnimation(nil)
         cancelActivityButton.isHidden = !viewModel.isCancellable
         synchronizeOutlineContent()
+        synchronizeLocalChangeIndicators()
         outlineView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("location"))?.isHidden = !viewModel.isShowingSearchResults
         rebuildBreadcrumbs()
 
@@ -404,6 +436,16 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             return
         }
         restoreExpandedState(in: rootNodes)
+        restoreSelection(urls: selectedURLs)
+    }
+
+    private func synchronizeLocalChangeIndicators() {
+        let keys = viewModel.modifiedURLKeysForCurrentSession
+        guard keys != renderedModifiedURLKeys else { return }
+        let selectedURLs = Set(selectedNodes.map { $0.row.url })
+        renderedModifiedURLKeys = keys
+        outlineView.reloadData()
+        if !viewModel.isShowingSearchResults { restoreExpandedState(in: rootNodes) }
         restoreSelection(urls: selectedURLs)
     }
 
@@ -610,6 +652,64 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         }
     }
 
+    func reviewModifiedOpenDocumentsIfNeeded(force: Bool = false) {
+        viewModel.refreshOpenDocumentChanges()
+        guard !isReviewingOpenDocumentChanges, !viewModel.isBusy else { return }
+        let changes = force
+            ? viewModel.modifiedOpenDocuments
+            : viewModel.modifiedOpenDocuments.filter(\.canUpload)
+        let change = changes.first { change in
+            force || lastPromptedOpenDocumentSignatures[change.id] != openDocumentSignature(change)
+        }
+        guard let change else { return }
+        isReviewingOpenDocumentChanges = true
+        lastPromptedOpenDocumentSignatures[change.id] = openDocumentSignature(change)
+        defer { isReviewingOpenDocumentChanges = false }
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "上传“\(change.displayName)”的修改？"
+        let size = change.byteSize.map {
+            ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)
+        } ?? "大小未知"
+        let date = change.modifiedAt?.formatted(date: .abbreviated, time: .shortened) ?? "时间未知"
+        alert.informativeText = change.canUpload
+            ? "检测到本地编辑副本已修改（\(size)，\(date)）。上传会先检查远端版本，然后创建一个新的 SVN revision。"
+            : "检测到本地编辑副本已修改（\(size)，\(date)）。请先连接这个文件所属的服务器，再上传修改；本地副本不会被自动删除。"
+        if change.canUpload {
+            alert.addButton(withTitle: "上传修改")
+            alert.addButton(withTitle: "稍后")
+            alert.addButton(withTitle: "在 Finder 中显示")
+        } else {
+            alert.addButton(withTitle: "稍后")
+            alert.addButton(withTitle: "在 Finder 中显示")
+        }
+        let response = alert.runModal()
+        if change.canUpload, response == .alertFirstButtonReturn {
+            guard let message = prompt(
+                title: "提交“\(change.displayName)”的修改",
+                message: "提交前会检查仓库文件是否已被其他人更新。",
+                fieldLabel: "提交说明",
+                initialValue: "更新：\(change.displayName)",
+                confirmTitle: "上传并提交"
+            ) else { return }
+            run {
+                _ = try await self.viewModel.uploadOpenDocumentChanges(id: change.id, message: message)
+                self.reviewModifiedOpenDocumentsIfNeeded(force: true)
+            }
+        } else if response == (change.canUpload ? .alertThirdButtonReturn : .alertSecondButtonReturn) {
+            NSWorkspace.shared.activateFileViewerSelecting([change.localURL])
+        }
+    }
+
+    @objc private func reviewOpenDocumentChanges() {
+        reviewModifiedOpenDocumentsIfNeeded(force: true)
+    }
+
+    private func openDocumentSignature(_ change: BrowserOpenDocumentChange) -> String {
+        "\(change.modifiedAt?.timeIntervalSinceReferenceDate ?? 0):\(change.byteSize ?? -1)"
+    }
+
     @objc private func toggleQuickLook() {
         guard let panel = QLPreviewPanel.shared() else { return }
         if panel.isVisible {
@@ -638,7 +738,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
                 return
             }
             do {
-                let localURL = try await viewModel.localURLForOpening(row)
+                let localURL = try await viewModel.localSnapshotURL(for: row)
                 try Task.checkCancellation()
                 guard selectedRow?.url == row.url else { return }
                 quickLookURL = localURL
@@ -870,6 +970,23 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let localURL = panel.url else { return }
         confirmReplace(row: row, localURL: localURL)
+    }
+
+    @objc private func resetSelectedLocalChanges() {
+        guard let row = selectedRow, viewModel.hasLocalChanges(for: row) else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "放弃“\(row.name)”的本地修改？"
+        alert.informativeText = "编辑副本会恢复到上次下载或成功提交的内容。此操作不会修改 SVN 仓库，并且无法撤销。"
+        alert.addButton(withTitle: "放弃修改")
+        alert.addButton(withTitle: "取消")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try viewModel.discardLocalChanges(for: row)
+        } catch {
+            presentError(message: error.localizedDescription)
+        }
     }
 
     @objc private func toggleFavoriteForSelectedItem() {
@@ -1459,6 +1576,9 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         if menuItem.action == #selector(removeFavoritesForSelectedItems) {
             return rows.contains(where: viewModel.isFavorite)
         }
+        if menuItem.action == #selector(resetSelectedLocalChanges) {
+            return rows.count == 1 && viewModel.hasLocalChanges(for: rows[0])
+        }
         if viewModel.isShowingSearchResults {
             switch menuItem.action {
             case #selector(renameSelectedItem), #selector(deleteSelectedItem), #selector(replaceSelectedItem):
@@ -1602,7 +1722,7 @@ extension BrowserViewController: NSOutlineViewDelegate {
             let identifier = NSUserInterfaceItemIdentifier("BrowserNameCell")
             let cell = outlineView.makeView(withIdentifier: identifier, owner: self) as? BrowserNameCell
                 ?? BrowserNameCell(identifier: identifier)
-            cell.configure(row: browserRow)
+            cell.configure(row: browserRow, hasLocalChanges: viewModel.hasLocalChanges(for: browserRow))
             return cell
         }
 
@@ -1810,6 +1930,7 @@ private final class BrowserUploadDropView: NSView {
 }
 
 private final class BrowserNameCell: NSTableCellView {
+    private let localChangeView = NSImageView()
     private let symbolView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
 
@@ -1818,8 +1939,22 @@ private final class BrowserNameCell: NSTableCellView {
         self.identifier = identifier
         imageView = symbolView
         textField = titleLabel
+        addSubview(localChangeView)
         addSubview(symbolView)
         addSubview(titleLabel)
+        localChangeView.symbolConfiguration = .init(pointSize: 12, weight: .semibold)
+        localChangeView.image = NSImage(
+            systemSymbolName: "questionmark.circle.fill",
+            accessibilityDescription: "有尚未上传的本地修改"
+        )
+        localChangeView.contentTintColor = .systemOrange
+        localChangeView.toolTip = "有尚未上传到 SVN 的本地修改"
+        localChangeView.isHidden = true
+        localChangeView.snp.makeConstraints {
+            $0.leading.equalToSuperview().inset(4)
+            $0.centerY.equalToSuperview()
+            $0.width.height.equalTo(14)
+        }
         symbolView.symbolConfiguration = .init(pointSize: 15, weight: .regular)
         symbolView.snp.makeConstraints {
             $0.leading.equalToSuperview().inset(7)
@@ -1836,8 +1971,18 @@ private final class BrowserNameCell: NSTableCellView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(row: BrowserRow) {
+    func configure(row: BrowserRow, hasLocalChanges: Bool) {
         titleLabel.stringValue = row.name
+        localChangeView.isHidden = !hasLocalChanges
+        symbolView.snp.remakeConstraints {
+            if hasLocalChanges {
+                $0.leading.equalTo(localChangeView.snp.trailing).offset(3)
+            } else {
+                $0.leading.equalToSuperview().inset(7)
+            }
+            $0.centerY.equalToSuperview()
+            $0.width.height.equalTo(18)
+        }
         let icon = BrowserFileIcon(row: row)
         symbolView.image = icon.image
         symbolView.contentTintColor = icon.tintColor

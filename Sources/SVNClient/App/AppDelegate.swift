@@ -24,7 +24,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        coordinator?.reviewModifiedOpenDocumentsIfNeeded()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let modifiedDocumentCount = coordinator?.modifiedOpenDocumentCount ?? 0
+        if modifiedDocumentCount > 0 {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "仍有 \(modifiedDocumentCount) 个文件的修改尚未上传"
+            alert.informativeText = "返回应用可以上传这些修改。即使现在退出，本地编辑副本也会保留，不会自动删除。"
+            alert.addButton(withTitle: "返回处理")
+            alert.addButton(withTitle: "退出并保留副本")
+            alert.addButton(withTitle: "在 Finder 中显示")
+            alert.buttons[1].hasDestructiveAction = true
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                coordinator?.reviewModifiedOpenDocumentsIfNeeded()
+                return .terminateCancel
+            case .alertThirdButtonReturn:
+                coordinator?.revealModifiedOpenDocumentCopies()
+                return .terminateCancel
+            default:
+                break
+            }
+        }
         let activeTransferCount = coordinator?.activeTransferCount ?? 0
         guard activeTransferCount > 0 else { return .terminateNow }
 
@@ -36,10 +61,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "仍然退出")
         alert.buttons.last?.hasDestructiveAction = true
         return alert.runModal() == .alertFirstButtonReturn ? .terminateCancel : .terminateNow
-    }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        coordinator?.cleanupOpenDocumentCopies()
     }
 
     private func installMainMenu() {

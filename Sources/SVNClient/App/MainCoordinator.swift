@@ -7,12 +7,17 @@ final class MainCoordinator {
     private let profileService: RepositoryProfileService
     private let metadataService: RepositoryMetadataService
     private weak var sidebarViewController: SidebarViewController?
+    private weak var browserViewController: BrowserViewController?
     private weak var browserViewModel: BrowserViewModel?
     private var connectionTask: Task<Void, Never>?
     private var connectionRequestID = UUID()
 
     var activeTransferCount: Int {
         browserViewModel?.activeTransferCount ?? 0
+    }
+
+    var modifiedOpenDocumentCount: Int {
+        browserViewModel?.modifiedOpenDocuments.count ?? 0
     }
 
     init(
@@ -148,6 +153,7 @@ final class MainCoordinator {
             }
         }
         self.sidebarViewController = sidebarViewController
+        self.browserViewController = browserViewController
         self.browserViewModel = browserViewModel
         mainWindowController = windowController
         windowController.showWindow(nil)
@@ -204,6 +210,7 @@ final class MainCoordinator {
             await self.reloadRepositoryProfiles()
             guard let parentWindow, let sheetWindow else { return }
             parentWindow.endSheet(sheetWindow)
+            self.browserViewController?.reviewModifiedOpenDocumentsIfNeeded()
         }
 
         parentWindow.beginSheet(sheetWindow)
@@ -287,6 +294,7 @@ final class MainCoordinator {
                     password: connection.password,
                     initialURL: initialURL
                 )
+                browserViewController?.reviewModifiedOpenDocumentsIfNeeded()
             } catch is CancellationError {
                 // A newer sidebar selection or the cancellation button superseded this connection.
                 guard requestID == connectionRequestID else { return }
@@ -352,6 +360,7 @@ final class MainCoordinator {
                         throw SavedItemError.noApplication
                     }
                 }
+                browserViewController?.reviewModifiedOpenDocumentsIfNeeded()
                 await reloadMetadata()
             } catch is CancellationError {
                 // Superseded selections must not open a file or update the active browser.
@@ -401,8 +410,13 @@ final class MainCoordinator {
         }
     }
 
-    func cleanupOpenDocumentCopies() {
-        browserViewModel?.cleanupOpenDocumentCopies()
+    func reviewModifiedOpenDocumentsIfNeeded() {
+        browserViewController?.reviewModifiedOpenDocumentsIfNeeded()
+    }
+
+    func revealModifiedOpenDocumentCopies() {
+        guard let urls = browserViewModel?.modifiedOpenDocuments.map(\.localURL), !urls.isEmpty else { return }
+        NSWorkspace.shared.activateFileViewerSelecting(urls)
     }
 }
 

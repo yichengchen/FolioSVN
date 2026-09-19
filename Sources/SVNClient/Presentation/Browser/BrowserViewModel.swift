@@ -51,6 +51,16 @@ struct BrowserFileHistory: Sendable {
     let options: SVNRequestOptions
 }
 
+struct BrowserOpenDocumentChange: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let displayName: String
+    let localURL: URL
+    let sourceURL: URL
+    let modifiedAt: Date?
+    let byteSize: Int64?
+    let canUpload: Bool
+}
+
 struct BrowserTransfer: Identifiable, Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case download
@@ -126,6 +136,27 @@ struct BrowserTransfer: Identifiable, Equatable, Sendable {
 
 @MainActor
 final class BrowserViewModel {
+    private struct OpenDocumentFingerprint: Codable, Equatable {
+        let modifiedAt: Date?
+        let byteSize: Int64?
+    }
+
+    private struct OpenDocumentManifest: Codable {
+        let id: UUID
+        let profileID: UUID
+        let sourceURL: URL
+        let displayName: String
+        var expectedRevision: Int?
+        var baseline: OpenDocumentFingerprint
+        let createdAt: Date
+    }
+
+    private struct TrackedOpenDocument {
+        var manifest: OpenDocumentManifest
+        let localURL: URL
+        var options: SVNRequestOptions?
+    }
+
     enum State: Equatable {
         case disconnected
         case loading
@@ -172,16 +203,90 @@ final class BrowserViewModel {
     private let cacheRootURL: URL?
     private let openDocumentSessionID = UUID()
     private static let abandonedOpenDocumentRetention: TimeInterval = 7 * 24 * 60 * 60
+    private static let openDocumentManifestName = ".svnclient-open-document.json"
+    private static let openDocumentBaselineName = ".svnclient-baseline"
+    private var openDocuments: [UUID: TrackedOpenDocument] = [:]
     private var backgroundDirectoryTasks: [URL: (id: UUID, task: Task<Void, Never>)] = [:]
 
     var activeTransferCount: Int {
         transfers.filter { $0.state == .running }.count
     }
 
+    var modifiedOpenDocuments: [BrowserOpenDocumentChange] {
+        openDocuments.values.compactMap { document in
+            guard let fingerprint = try? openDocumentFingerprint(at: document.localURL),
+                  fingerprint != document.manifest.baseline else { return nil }
+            return BrowserOpenDocumentChange(
+                id: document.manifest.id,
+                displayName: document.manifest.displayName,
+                localURL: document.localURL,
+                sourceURL: document.manifest.sourceURL,
+                modifiedAt: fingerprint.modifiedAt,
+                byteSize: fingerprint.byteSize,
+                canUpload: document.options != nil
+            )
+        }.sorted { ($0.modifiedAt ?? .distantPast) > ($1.modifiedAt ?? .distantPast) }
+    }
+
+    var modifiedURLKeysForCurrentSession: Set<String> {
+        guard let profileID = session?.profileID else { return [] }
+        return Set(openDocuments.values.compactMap { document in
+            guard document.manifest.profileID == profileID,
+                  let fingerprint = try? openDocumentFingerprint(at: document.localURL),
+                  fingerprint != document.manifest.baseline else { return nil }
+            return document.manifest.sourceURL.absoluteString
+        })
+    }
+
+    func hasLocalChanges(for row: BrowserRow) -> Bool {
+        guard row.kind == .file, let profileID = session?.profileID else { return false }
+        return modifiedDocument(for: row.url, profileID: profileID) != nil
+    }
+
+    func discardLocalChanges(for row: BrowserRow) throws {
+        guard let profileID = session?.profileID,
+              var document = modifiedDocument(for: row.url, profileID: profileID) else {
+            throw SVNClientError.invalidLocalFile("没有需要放弃的本地修改")
+        }
+        let baselineURL = openDocumentBaselineURL(for: document)
+        let sourceURL: URL
+        if FileManager.default.fileExists(atPath: baselineURL.path) {
+            sourceURL = baselineURL
+        } else if let revision = document.manifest.expectedRevision {
+            let snapshotURL = try snapshotCacheURL(
+                profileID: document.manifest.profileID,
+                revision: revision,
+                itemURL: document.manifest.sourceURL
+            )
+            guard FileManager.default.fileExists(atPath: snapshotURL.path) else {
+                throw SVNClientError.invalidLocalFile("找不到可用于重置的原始副本")
+            }
+            sourceURL = snapshotURL
+        } else {
+            throw SVNClientError.invalidLocalFile("找不到可用于重置的原始副本")
+        }
+        let temporaryURL = document.localURL.deletingLastPathComponent()
+            .appendingPathComponent(".svnclient-reset-\(UUID().uuidString)")
+        try FileManager.default.copyItem(at: sourceURL, to: temporaryURL)
+        do {
+            _ = try FileManager.default.replaceItemAt(document.localURL, withItemAt: temporaryURL)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: document.localURL.path)
+            document.manifest.baseline = try openDocumentFingerprint(at: document.localURL)
+            try writeOpenDocumentManifest(document)
+            openDocuments[document.manifest.id] = document
+            noticeText = "已放弃“\(document.manifest.displayName)”的本地修改"
+            onChange?()
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            throw error
+        }
+    }
+
     init(svnClient: any SVNClient, metadataService: RepositoryMetadataService? = nil, cacheRootURL: URL? = nil) {
         self.svnClient = svnClient
         self.metadataService = metadataService
         self.cacheRootURL = cacheRootURL
+        try? loadTrackedOpenDocuments()
         try? cleanupAbandonedOpenDocumentCopies()
     }
 
@@ -213,6 +318,9 @@ final class BrowserViewModel {
         activityID = UUID()
         activityTransferID = nil
         self.session = session
+        for id in openDocuments.keys where openDocuments[id]?.manifest.profileID == session.profileID {
+            openDocuments[id]?.options = session.options
+        }
         currentURL = nil
         rows = []
         browsingRows = []
@@ -502,18 +610,44 @@ final class BrowserViewModel {
     }
 
     func localURLForOpening(_ row: BrowserRow) async throws -> URL {
-        try editableCopy(of: await localSnapshotURL(for: row))
+        guard let session, row.kind == .file else { throw SVNClientError.unsupportedOperation }
+        let revision = try await effectiveRevision(for: row, session: session)
+        if let existing = openDocuments.values.first(where: {
+            $0.manifest.profileID == session.profileID && $0.manifest.sourceURL == row.url
+        }), FileManager.default.fileExists(atPath: existing.localURL.path) {
+            let isModified = (try? openDocumentFingerprint(at: existing.localURL)) != existing.manifest.baseline
+            if isModified || existing.manifest.expectedRevision == revision {
+                return existing.localURL
+            }
+            removeOpenDocument(id: existing.manifest.id)
+        }
+        let snapshot = try await localSnapshotURL(for: row, effectiveRevision: revision, session: session)
+        return try editableCopy(
+            of: snapshot,
+            sourceURL: row.url,
+            profileID: session.profileID,
+            expectedRevision: revision,
+            options: session.options
+        )
     }
 
     func localSnapshotURL(for row: BrowserRow) async throws -> URL {
         guard let session, row.kind == .file else { throw SVNClientError.unsupportedOperation }
-        let effectiveRevision: Int?
-        if isShowingSearchResults || row.revision == nil {
-            let liveInfo = try await svnClient.info(url: row.url, options: session.options)
-            effectiveRevision = liveInfo.lastChangedRevision ?? liveInfo.revision
-        } else {
-            effectiveRevision = row.revision
-        }
+        let effectiveRevision = try await effectiveRevision(for: row, session: session)
+        return try await localSnapshotURL(for: row, effectiveRevision: effectiveRevision, session: session)
+    }
+
+    private func effectiveRevision(for row: BrowserRow, session: RepositorySession) async throws -> Int {
+        if !isShowingSearchResults, let revision = row.revision { return revision }
+        let liveInfo = try await svnClient.info(url: row.url, options: session.options)
+        return liveInfo.lastChangedRevision ?? liveInfo.revision
+    }
+
+    private func localSnapshotURL(
+        for row: BrowserRow,
+        effectiveRevision: Int,
+        session: RepositorySession
+    ) async throws -> URL {
         let cacheURL = try snapshotCacheURL(
             profileID: session.profileID,
             revision: effectiveRevision,
@@ -538,6 +672,79 @@ final class BrowserViewModel {
         }
         try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: cacheURL.path)
         return cacheURL
+    }
+
+    func refreshOpenDocumentChanges() {
+        onChange?()
+    }
+
+    func uploadOpenDocumentChanges(id: UUID, message: String) async throws -> SVNWriteResult {
+        guard var document = openDocuments[id],
+              FileManager.default.fileExists(atPath: document.localURL.path) else {
+            throw SVNClientError.invalidLocalFile("本地编辑副本已经不存在")
+        }
+        if document.options == nil,
+           let session, session.profileID == document.manifest.profileID {
+            document.options = session.options
+        }
+        guard let options = document.options else {
+            throw SVNClientError.invalidLocalFile("请先连接该文件所属的 SVN 服务器，再上传修改")
+        }
+        let currentFingerprint = try openDocumentFingerprint(at: document.localURL)
+        guard currentFingerprint != document.manifest.baseline else {
+            throw SVNClientError.invalidLocalFile("文件内容没有新的修改")
+        }
+        let expectedRevision: Int
+        if let recordedRevision = document.manifest.expectedRevision {
+            expectedRevision = recordedRevision
+        } else {
+            let info = try await svnClient.info(url: document.manifest.sourceURL, options: options)
+            expectedRevision = info.lastChangedRevision ?? info.revision
+        }
+        let profileID = document.manifest.profileID
+        let generation = session?.profileID == profileID ? sessionGeneration : UUID()
+        let stagedBaselineURL = document.localURL.deletingLastPathComponent()
+            .appendingPathComponent(".svnclient-baseline-\(UUID().uuidString)")
+        try FileManager.default.copyItem(at: document.localURL, to: stagedBaselineURL)
+        let result: SVNWriteResult
+        do {
+            result = try await performTransfer(
+                kind: .replace,
+                title: "上传 \(document.manifest.displayName) 的修改",
+                detail: "检查远端 r\(expectedRevision) 后创建新版本",
+                cancellable: false,
+                outputURL: nil,
+                retryRequest: nil
+            ) { updateStage in
+                updateStage(.checkingAndCommitting)
+                return try await self.svnClient.replace(
+                    localFileURL: stagedBaselineURL,
+                    targetURL: document.manifest.sourceURL,
+                    expectedRevision: expectedRevision,
+                    message: message,
+                    options: options
+                )
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: stagedBaselineURL)
+            throw error
+        }
+        document.manifest.expectedRevision = result.revision
+        document.manifest.baseline = currentFingerprint
+        let baselineURL = openDocumentBaselineURL(for: document)
+        try? FileManager.default.removeItem(at: baselineURL)
+        try? FileManager.default.moveItem(at: stagedBaselineURL, to: baselineURL)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: baselineURL.path)
+        try? writeOpenDocumentManifest(document)
+        openDocuments[id] = document
+        await finishCommittedWrite(
+            "已上传“\(document.manifest.displayName)”的修改",
+            result: result,
+            profileID: profileID,
+            generation: generation
+        )
+        onChange?()
+        return result
     }
 
     func history(for row: BrowserRow, limit: Int = 100) async throws -> BrowserFileHistory {
@@ -614,7 +821,7 @@ final class BrowserViewModel {
     }
 
     func localURLForOpening(history: BrowserFileHistory, revision: Int) async throws -> URL {
-        try editableCopy(of: await localSnapshotURL(history: history, revision: revision))
+        try await localSnapshotURL(history: history, revision: revision)
     }
 
     func localSnapshotURL(history: BrowserFileHistory, revision: Int) async throws -> URL {
@@ -1307,7 +1514,13 @@ final class BrowserViewModel {
             .appendingPathComponent(itemURL.lastPathComponent)
     }
 
-    private func editableCopy(of snapshotURL: URL) throws -> URL {
+    private func editableCopy(
+        of snapshotURL: URL,
+        sourceURL: URL,
+        profileID: UUID,
+        expectedRevision: Int,
+        options: SVNRequestOptions
+    ) throws -> URL {
         let directory = try managedCacheRoot().appendingPathComponent("OpenDocuments", isDirectory: true)
             .appendingPathComponent(openDocumentSessionID.uuidString, isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1316,6 +1529,21 @@ final class BrowserViewModel {
         do {
             try FileManager.default.copyItem(at: snapshotURL, to: copyURL)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: copyURL.path)
+            let manifest = OpenDocumentManifest(
+                id: UUID(),
+                profileID: profileID,
+                sourceURL: sourceURL,
+                displayName: snapshotURL.lastPathComponent,
+                expectedRevision: expectedRevision,
+                baseline: try openDocumentFingerprint(at: copyURL),
+                createdAt: .now
+            )
+            let document = TrackedOpenDocument(manifest: manifest, localURL: copyURL, options: options)
+            let baselineURL = openDocumentBaselineURL(for: document)
+            try FileManager.default.copyItem(at: snapshotURL, to: baselineURL)
+            try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: baselineURL.path)
+            try writeOpenDocumentManifest(document)
+            openDocuments[manifest.id] = document
             return copyURL
         } catch {
             try? FileManager.default.removeItem(at: directory)
@@ -1324,29 +1552,126 @@ final class BrowserViewModel {
     }
 
     func cleanupOpenDocumentCopies() {
-        guard let sessionURL = try? openDocumentSessionURL() else { return }
-        try? FileManager.default.removeItem(at: sessionURL)
-        removeOpenDocumentsRootIfEmpty(sessionURL.deletingLastPathComponent())
+        for id in Array(openDocuments.keys) {
+            guard let document = openDocuments[id],
+                  let fingerprint = try? openDocumentFingerprint(at: document.localURL) else {
+                openDocuments.removeValue(forKey: id)
+                continue
+            }
+            guard fingerprint == document.manifest.baseline else { continue }
+            removeOpenDocument(id: id)
+        }
+        if let sessionURL = try? openDocumentSessionURL() {
+            removeOpenDocumentsRootIfEmpty(sessionURL)
+            removeOpenDocumentsRootIfEmpty(sessionURL.deletingLastPathComponent())
+        }
     }
 
     private func cleanupAbandonedOpenDocumentCopies(now: Date = .now) throws {
         let root = try openDocumentsRootURL()
         guard FileManager.default.fileExists(atPath: root.path) else { return }
         let keys: Set<URLResourceKey> = [.contentModificationDateKey, .creationDateKey, .isDirectoryKey]
-        let directories = try FileManager.default.contentsOfDirectory(
+        let sessionDirectories = try FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: Array(keys),
             options: [.skipsHiddenFiles]
         )
         let expirationDate = now.addingTimeInterval(-Self.abandonedOpenDocumentRetention)
-        for directory in directories where directory.lastPathComponent != openDocumentSessionID.uuidString {
-            let values = try? directory.resourceValues(forKeys: keys)
-            guard values?.isDirectory == true,
-                  let modifiedAt = values?.contentModificationDate ?? values?.creationDate,
-                  modifiedAt < expirationDate else { continue }
-            try? FileManager.default.removeItem(at: directory)
+        for sessionDirectory in sessionDirectories where sessionDirectory.lastPathComponent != openDocumentSessionID.uuidString {
+            let copyDirectories = (try? FileManager.default.contentsOfDirectory(
+                at: sessionDirectory,
+                includingPropertiesForKeys: Array(keys),
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            if copyDirectories.isEmpty {
+                let values = try? sessionDirectory.resourceValues(forKeys: keys)
+                if let modifiedAt = values?.contentModificationDate ?? values?.creationDate,
+                   modifiedAt < expirationDate {
+                    try? FileManager.default.removeItem(at: sessionDirectory)
+                }
+                continue
+            }
+            for directory in copyDirectories {
+                let values = try? directory.resourceValues(forKeys: keys)
+                guard values?.isDirectory == true,
+                      let modifiedAt = values?.contentModificationDate ?? values?.creationDate,
+                      modifiedAt < expirationDate else { continue }
+                if let document = openDocuments.values.first(where: {
+                    $0.localURL.deletingLastPathComponent() == directory
+                }), let fingerprint = try? openDocumentFingerprint(at: document.localURL),
+                   fingerprint != document.manifest.baseline {
+                    continue
+                }
+                try? FileManager.default.removeItem(at: directory)
+                openDocuments = openDocuments.filter {
+                    $0.value.localURL.deletingLastPathComponent() != directory
+                }
+            }
+            removeOpenDocumentsRootIfEmpty(sessionDirectory)
         }
         removeOpenDocumentsRootIfEmpty(root)
+    }
+
+    private func loadTrackedOpenDocuments() throws {
+        let root = try openDocumentsRootURL()
+        guard FileManager.default.fileExists(atPath: root.path) else { return }
+        let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: []
+        )
+        while let fileURL = enumerator?.nextObject() as? URL {
+            guard fileURL.lastPathComponent == Self.openDocumentManifestName,
+                  let data = try? Data(contentsOf: fileURL),
+                  let manifest = try? JSONDecoder().decode(OpenDocumentManifest.self, from: data) else { continue }
+            let localURL = fileURL.deletingLastPathComponent().appendingPathComponent(manifest.displayName)
+            guard FileManager.default.fileExists(atPath: localURL.path) else { continue }
+            openDocuments[manifest.id] = TrackedOpenDocument(
+                manifest: manifest,
+                localURL: localURL,
+                options: nil
+            )
+        }
+    }
+
+    private func writeOpenDocumentManifest(_ document: TrackedOpenDocument) throws {
+        let url = document.localURL.deletingLastPathComponent()
+            .appendingPathComponent(Self.openDocumentManifestName)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(document.manifest).write(to: url, options: .atomic)
+    }
+
+    private func openDocumentFingerprint(at url: URL) throws -> OpenDocumentFingerprint {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return OpenDocumentFingerprint(
+            modifiedAt: attributes[.modificationDate] as? Date,
+            byteSize: (attributes[.size] as? NSNumber)?.int64Value
+        )
+    }
+
+    private func modifiedDocument(for sourceURL: URL, profileID: UUID) -> TrackedOpenDocument? {
+        openDocuments.values
+            .filter { $0.manifest.profileID == profileID && $0.manifest.sourceURL == sourceURL }
+            .filter { document in
+                guard let fingerprint = try? openDocumentFingerprint(at: document.localURL) else { return false }
+                return fingerprint != document.manifest.baseline
+            }
+            .max { lhs, rhs in
+                lhs.manifest.createdAt < rhs.manifest.createdAt
+            }
+    }
+
+    private func openDocumentBaselineURL(for document: TrackedOpenDocument) -> URL {
+        document.localURL.deletingLastPathComponent()
+            .appendingPathComponent(Self.openDocumentBaselineName)
+    }
+
+    private func removeOpenDocument(id: UUID) {
+        guard let document = openDocuments.removeValue(forKey: id) else { return }
+        let directory = document.localURL.deletingLastPathComponent()
+        try? FileManager.default.removeItem(at: directory)
+        removeOpenDocumentsRootIfEmpty(directory.deletingLastPathComponent())
     }
 
     private func openDocumentsRootURL() throws -> URL {

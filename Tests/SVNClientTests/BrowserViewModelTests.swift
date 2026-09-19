@@ -512,7 +512,7 @@ final class BrowserViewModelTests: XCTestCase {
         }
     }
 
-    func testEditableOpenCopiesCannotContaminateHistoricalSnapshots() async throws {
+    func testEditableOpenCopiesCannotContaminateHistoricalSnapshotsOrBeDeletedWhileModified() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("snapshot-test-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
         let openDocumentsRoot = root.appendingPathComponent("OpenDocuments", isDirectory: true)
@@ -548,8 +548,105 @@ final class BrowserViewModelTests: XCTestCase {
         let sessionDirectory = firstCopy.deletingLastPathComponent().deletingLastPathComponent()
         XCTAssertTrue(FileManager.default.fileExists(atPath: sessionDirectory.path))
         model.cleanupOpenDocumentCopies()
-        XCTAssertFalse(FileManager.default.fileExists(atPath: sessionDirectory.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstCopy.path), "Unsaved edits must survive app cleanup")
+        XCTAssertEqual(model.modifiedOpenDocuments.map(\.localURL), [firstCopy])
         XCTAssertTrue(FileManager.default.fileExists(atPath: recent.path), "Cleanup must only remove this app session")
+    }
+
+    func testOpenDocumentChangesCanBeUploadedAndRepeatedOpenReusesTheSameCopy() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("open-upload-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = StabilitySVNClient()
+        let model = BrowserViewModel(svnClient: client, cacheRootURL: root)
+        try await model.connect(to: URL(string: "https://example.com/root")!)
+        let row = try XCTUnwrap(model.rows.first(where: { $0.kind == .file }))
+
+        let firstOpen = try await model.localURLForOpening(row)
+        let repeatedOpen = try await model.localURLForOpening(row)
+        XCTAssertEqual(firstOpen, repeatedOpen)
+        XCTAssertTrue(model.modifiedOpenDocuments.isEmpty)
+
+        try Data("edited once".utf8).write(to: firstOpen)
+        let firstChange = try XCTUnwrap(model.modifiedOpenDocuments.first)
+        XCTAssertTrue(firstChange.canUpload)
+        _ = try await model.uploadOpenDocumentChanges(id: firstChange.id, message: "first edit")
+        XCTAssertTrue(model.modifiedOpenDocuments.isEmpty)
+        let firstExpectedRevision = await client.lastReplaceExpectedRevision
+        let firstContents = await client.lastReplaceContents
+        XCTAssertEqual(firstExpectedRevision, 4)
+        XCTAssertEqual(firstContents, "edited once")
+
+        try Data("edited twice".utf8).write(to: firstOpen)
+        let secondChange = try XCTUnwrap(model.modifiedOpenDocuments.first)
+        _ = try await model.uploadOpenDocumentChanges(id: secondChange.id, message: "second edit")
+        let secondExpectedRevision = await client.lastReplaceExpectedRevision
+        XCTAssertEqual(secondExpectedRevision, 42, "The successful commit revision becomes the next concurrency check")
+
+        model.cleanupOpenDocumentCopies()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: firstOpen.path), "Clean editing copies can be removed")
+    }
+
+    func testDiscardLocalChangesRestoresLastDownloadedOrCommittedContents() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("open-reset-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = StabilitySVNClient()
+        let model = BrowserViewModel(svnClient: client, cacheRootURL: root)
+        try await model.connect(to: URL(string: "https://example.com/root")!)
+        let row = try XCTUnwrap(model.rows.first(where: { $0.kind == .file }))
+        let localURL = try await model.localURLForOpening(row)
+
+        try Data("discard this".utf8).write(to: localURL)
+        XCTAssertTrue(model.hasLocalChanges(for: row))
+        try model.discardLocalChanges(for: row)
+        XCTAssertFalse(model.hasLocalChanges(for: row))
+        XCTAssertEqual(try String(contentsOf: localURL, encoding: .utf8), "r4")
+
+        try Data("committed baseline".utf8).write(to: localURL)
+        let change = try XCTUnwrap(model.modifiedOpenDocuments.first)
+        _ = try await model.uploadOpenDocumentChanges(id: change.id, message: "commit baseline")
+        try Data("second uncommitted edit".utf8).write(to: localURL)
+        try model.discardLocalChanges(for: row)
+        XCTAssertEqual(try String(contentsOf: localURL, encoding: .utf8), "committed baseline")
+        XCTAssertFalse(model.hasLocalChanges(for: row))
+    }
+
+    func testModifiedOpenDocumentIsRecoveredAfterRelaunchAndReenabledAfterReconnect() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("open-recovery-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = StabilitySVNClient()
+        let profileID = UUID()
+        let repositoryURL = URL(string: "https://example.com/root")!
+        let originalSession = RepositorySession(
+            profileID: profileID,
+            displayName: "Documents",
+            baseURL: repositoryURL,
+            options: .anonymous
+        )
+        var firstModel: BrowserViewModel? = BrowserViewModel(svnClient: client, cacheRootURL: root)
+        try await firstModel?.connect(session: originalSession)
+        let row = try XCTUnwrap(firstModel?.rows.first(where: { $0.kind == .file }))
+        let localURL = try await firstModel?.localURLForOpening(row)
+        try Data("recovered edit".utf8).write(to: try XCTUnwrap(localURL))
+        firstModel = nil
+
+        let relaunchedModel = BrowserViewModel(svnClient: client, cacheRootURL: root)
+        let recoveredBeforeConnect = try XCTUnwrap(relaunchedModel.modifiedOpenDocuments.first)
+        XCTAssertEqual(
+            recoveredBeforeConnect.localURL.resolvingSymlinksInPath(),
+            localURL?.resolvingSymlinksInPath()
+        )
+        XCTAssertFalse(recoveredBeforeConnect.canUpload)
+
+        try await relaunchedModel.connect(session: originalSession)
+        let recoveredAfterConnect = try XCTUnwrap(relaunchedModel.modifiedOpenDocuments.first)
+        XCTAssertTrue(recoveredAfterConnect.canUpload)
+        _ = try await relaunchedModel.uploadOpenDocumentChanges(
+            id: recoveredAfterConnect.id,
+            message: "recover"
+        )
+        XCTAssertTrue(relaunchedModel.modifiedOpenDocuments.isEmpty)
+        let contents = await client.lastReplaceContents
+        XCTAssertEqual(contents, "recovered edit")
     }
 
     func testSnapshotCacheIncludesFullSourceURLWhenProfileIsEdited() async throws {
@@ -1134,6 +1231,8 @@ private actor StabilitySVNClient: SVNClient {
     private var failLists = false
     private(set) var writeCount = 0
     private(set) var exportCount = 0
+    private(set) var lastReplaceExpectedRevision: Int?
+    private(set) var lastReplaceContents: String?
     func setFailLists(_ value: Bool) { failLists = value }
     func version() async throws -> String { "1.14.5" }
     func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
@@ -1151,7 +1250,11 @@ private actor StabilitySVNClient: SVNClient {
     func move(from sourceURL: URL, to destinationURL: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult { commit() }
     func delete(urls: [URL], message: String, options: SVNRequestOptions) async throws -> SVNWriteResult { commit() }
     func upload(files: [URL], to directoryURL: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult { commit() }
-    func replace(localFileURL: URL, targetURL: URL, expectedRevision: Int, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult { commit() }
+    func replace(localFileURL: URL, targetURL: URL, expectedRevision: Int, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
+        lastReplaceExpectedRevision = expectedRevision
+        lastReplaceContents = try String(contentsOf: localFileURL, encoding: .utf8)
+        return commit()
+    }
     func export(url: URL, to destinationURL: URL, revision: Int?, overwrite: Bool, options: SVNRequestOptions) async throws {
         exportCount += 1
         try Data("r\(revision ?? 0)".utf8).write(to: destinationURL)
