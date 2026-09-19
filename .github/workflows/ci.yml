@@ -54,8 +54,14 @@ jobs:
           unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
 
-      - name: Verify generated Xcode project is current
+      - name: Install .NET SDK for Word diff runtime
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Build Word diff runtime and verify generated project
         run: |
+          Scripts/package-worddiff-runtime.sh
           xcodegen generate
           git diff --exit-code -- SVNClient.xcodeproj
 

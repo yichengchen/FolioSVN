@@ -1007,7 +1007,7 @@ private actor ExpandedRefreshSVNClient: SVNClient {
     func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
         let name = url.lastPathComponent
         counts[name, default: 0] += 1
-        func entry(_ name: String, _ kind: EntryKind) -> SVNListEntry {
+        func entry(_ name: String, _ kind: SVNListEntry.Kind) -> SVNListEntry {
             SVNListEntry(name: name, kind: kind, size: nil, revision: updated ? 10 : 4, author: nil, updatedAt: nil)
         }
         switch name {

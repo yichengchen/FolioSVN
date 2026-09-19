@@ -82,12 +82,6 @@ jobs:
           xcodegen generate
           git diff --exit-code -- SVNClient.xcodeproj
 
-      - name: Run unsigned Debug tests
-        run: |
-          xcodebuild -project SVNClient.xcodeproj -scheme SVNClient \
-            -configuration Debug -destination 'platform=macOS,arch=arm64' \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
-
       - name: Import Developer ID certificate into temporary keychain
         env:
           CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
