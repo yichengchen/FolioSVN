@@ -130,11 +130,10 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         }
         searchTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(for: .milliseconds(250))
                 guard let self else { return }
                 try await viewModel.search(query: query)
             } catch is CancellationError {
-                // A newer keystroke superseded this query.
+                // A newer submitted query or an explicit cancellation superseded this search.
             } catch {
                 self?.presentError(message: error.localizedDescription)
             }
@@ -1401,6 +1400,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         onCancelConnection?()
         operationTask?.cancel()
         searchTask?.cancel()
+        viewModel.cancelSearchIndexRefresh()
         quickLookTask?.cancel()
         filePromiseTasks.values.forEach { $0.cancel() }
     }

@@ -136,6 +136,17 @@ struct BrowserTransfer: Identifiable, Equatable, Sendable {
 
 @MainActor
 final class BrowserViewModel {
+    private struct SearchIndexRefreshKey: Hashable {
+        let profileID: UUID
+        let rootURL: URL
+        let generation: UUID
+    }
+
+    private struct SharedSearchIndexRefresh {
+        let id: UUID
+        let task: Task<Void, Error>
+    }
+
     private struct OpenDocumentFingerprint: Codable, Equatable {
         let modifiedAt: Date?
         let byteSize: Int64?
@@ -207,6 +218,7 @@ final class BrowserViewModel {
     private static let openDocumentBaselineName = ".svnclient-baseline"
     private var openDocuments: [UUID: TrackedOpenDocument] = [:]
     private var backgroundDirectoryTasks: [URL: (id: UUID, task: Task<Void, Never>)] = [:]
+    private var searchIndexRefreshTasks: [SearchIndexRefreshKey: SharedSearchIndexRefresh] = [:]
 
     var activeTransferCount: Int {
         transfers.filter { $0.state == .running }.count
@@ -312,6 +324,7 @@ final class BrowserViewModel {
 
     func connect(session: RepositorySession, initialURL: URL? = nil) async throws {
         cancelBackgroundDirectoryTasks()
+        cancelSearchIndexRefreshTasks()
         sessionGeneration = UUID()
         let generation = sessionGeneration
         directoryRequestID = UUID()
@@ -356,6 +369,7 @@ final class BrowserViewModel {
     func disconnect(profileID: UUID) {
         guard session?.profileID == profileID else { return }
         cancelBackgroundDirectoryTasks()
+        cancelSearchIndexRefreshTasks()
         sessionGeneration = UUID()
         directoryRequestID = UUID()
         activityID = UUID()
@@ -951,6 +965,43 @@ final class BrowserViewModel {
     private func refreshSearchIndex(rootURL: URL) async throws {
         guard let session, let metadataService else { throw SVNClientError.unsupportedOperation }
         let generation = sessionGeneration
+        let key = SearchIndexRefreshKey(
+            profileID: session.profileID,
+            rootURL: rootURL,
+            generation: generation
+        )
+        if let sharedRefresh = searchIndexRefreshTasks[key] {
+            try await sharedRefresh.task.value
+            try Task.checkCancellation()
+            return
+        }
+
+        let id = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.rebuildSearchIndex(
+                rootURL: rootURL,
+                session: session,
+                metadataService: metadataService,
+                generation: generation
+            )
+        }
+        searchIndexRefreshTasks[key] = SharedSearchIndexRefresh(id: id, task: task)
+        defer {
+            if searchIndexRefreshTasks[key]?.id == id {
+                searchIndexRefreshTasks.removeValue(forKey: key)
+            }
+        }
+        try await task.value
+        try Task.checkCancellation()
+    }
+
+    private func rebuildSearchIndex(
+        rootURL: URL,
+        session: RepositorySession,
+        metadataService: RepositoryMetadataService,
+        generation: UUID
+    ) async throws {
         let entries = try await performActivity("正在更新文件名索引…", cancellable: true) {
             try await self.svnClient.listRecursively(url: rootURL, options: session.options)
         }
@@ -1039,8 +1090,13 @@ final class BrowserViewModel {
     }
 
     func clearSearch() {
+        cancelSearchIndexRefreshTasks()
         endSearchMode(restoreRows: true)
         onChange?()
+    }
+
+    func cancelSearchIndexRefresh() {
+        cancelSearchIndexRefreshTasks()
     }
 
     func createDirectory(name: String, in directoryURL: URL? = nil, message: String) async throws -> SVNWriteResult {
@@ -1195,6 +1251,7 @@ final class BrowserViewModel {
     private func load(url: URL, clearRows: Bool, policy: DirectoryLoadPolicy, requestID: UUID = UUID()) async throws {
         guard let session else { return }
         cancelBackgroundDirectoryTasks()
+        cancelSearchIndexRefreshTasks()
         endSearchMode(restoreRows: true)
         let generation = sessionGeneration
         directoryRequestID = requestID
@@ -1266,6 +1323,11 @@ final class BrowserViewModel {
     private func cancelBackgroundDirectoryTasks() {
         backgroundDirectoryTasks.values.forEach { $0.task.cancel() }
         backgroundDirectoryTasks.removeAll()
+    }
+
+    private func cancelSearchIndexRefreshTasks() {
+        searchIndexRefreshTasks.values.forEach { $0.task.cancel() }
+        searchIndexRefreshTasks.removeAll()
     }
 
     private func scheduleDirectoryRevalidation(url: URL, session: RepositorySession, pageRequestID: UUID?) {

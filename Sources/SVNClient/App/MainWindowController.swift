@@ -4,6 +4,7 @@ final class MainWindowController: NSWindowController {
     var onConnectRepository: (() -> Void)?
     private let browserViewController: BrowserViewController
     private let searchField = NSSearchField()
+    private var synchronizedSearchQuery = ""
 
     private enum ToolbarIdentifier {
         static let main = NSToolbar.Identifier("MainToolbarV16")
@@ -41,15 +42,18 @@ final class MainWindowController: NSWindowController {
         super.init(window: window)
         searchField.placeholderString = "搜索当前目录"
         searchField.target = self
-        searchField.action = #selector(searchChanged)
-        searchField.sendsSearchStringImmediately = true
+        searchField.action = #selector(submitSearch)
+        searchField.sendsSearchStringImmediately = false
+        searchField.sendsWholeSearchString = true
         searchField.widthAnchor.constraint(equalToConstant: 230).isActive = true
         window.toolbar = makeToolbar()
         window.toolbarStyle = .unified
         browserViewController.onNavigationStateChange = { [weak self] in
             guard let self else { return }
-            if searchField.stringValue != browserViewController.currentSearchQuery {
-                searchField.stringValue = browserViewController.currentSearchQuery
+            let query = browserViewController.currentSearchQuery
+            if query != synchronizedSearchQuery {
+                searchField.stringValue = query
+                synchronizedSearchQuery = query
             }
             self.window?.toolbar?.validateVisibleItems()
         }
@@ -75,7 +79,7 @@ final class MainWindowController: NSWindowController {
     @objc private func createFolder() { browserViewController.createFolder() }
     @objc private func uploadFiles() { browserViewController.uploadFiles() }
     @objc private func connectRepository() { onConnectRepository?() }
-    @objc private func searchChanged() { performSearch() }
+    @objc private func submitSearch() { performSearch() }
 
     private func performSearch() {
         browserViewController.updateSearch(query: searchField.stringValue)

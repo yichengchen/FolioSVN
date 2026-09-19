@@ -893,6 +893,46 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertEqual(Set(viewModel.rows.map(\.name)), ["API-Guide.txt", "api-plan.txt"])
     }
 
+    func testConcurrentSearchesReuseAnInFlightIndexRefresh() async throws {
+        let store = try RepositoryMetadataStore(inMemory: ())
+        let metadata = RepositoryMetadataService(store: store)
+        let client = CoalescingSearchSVNClient()
+        let viewModel = BrowserViewModel(svnClient: client, metadataService: metadata)
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+
+        try await viewModel.connect(to: rootURL)
+        let first = Task { @MainActor in try await viewModel.search(query: "api") }
+        await client.waitForRecursiveRequestCount(1)
+        let second = Task { @MainActor in try await viewModel.search(query: "readme") }
+        for _ in 0..<100 { await Task.yield() }
+
+        let countWhileBothSearchesAreWaiting = await client.recursiveListCount
+        XCTAssertEqual(countWhileBothSearchesAreWaiting, 1)
+        await client.resolveRecursiveRequests()
+        _ = try? await first.value
+        try await second.value
+
+        let finalRecursiveListCount = await client.recursiveListCount
+        XCTAssertEqual(finalRecursiveListCount, 1)
+        XCTAssertEqual(viewModel.rows.map(\.name), ["README.txt"])
+    }
+
+    func testToolbarSearchOnlySubmitsTheWholeString() throws {
+        let viewModel = BrowserViewModel(svnClient: MockSVNClient(result: .success([])))
+        let browser = BrowserViewController(viewModel: viewModel)
+        let windowController = MainWindowController(
+            sidebarViewController: SidebarViewController(userDefaults: UserDefaults(suiteName: UUID().uuidString)!),
+            browserViewController: browser
+        )
+        let searchItem = try XCTUnwrap(
+            windowController.window?.toolbar?.items.first { $0.itemIdentifier.rawValue == "Search" }
+        )
+        let searchField = try XCTUnwrap(searchItem.view as? NSSearchField)
+
+        XCTAssertFalse(searchField.sendsSearchStringImmediately)
+        XCTAssertTrue(searchField.sendsWholeSearchString)
+    }
+
     func testFavoritesArePersistedAndReflectedSynchronouslyInTheContextMenuState() async throws {
         let store = try RepositoryMetadataStore(inMemory: ())
         let metadata = RepositoryMetadataService(store: store)
@@ -1405,6 +1445,36 @@ private actor SearchSVNClient: SVNClient {
             withIntermediateDirectories: true
         )
         try Data("test".utf8).write(to: destinationURL)
+    }
+}
+
+private actor CoalescingSearchSVNClient: SVNClient {
+    private(set) var recursiveListCount = 0
+    private var recursiveContinuations: [CheckedContinuation<[SVNListEntry], Error>] = []
+
+    func version() async throws -> String { "1.14.5" }
+
+    func list(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        [SVNListEntry(name: "README.txt", kind: .file, size: 10, revision: 5, author: nil, updatedAt: nil)]
+    }
+
+    func listRecursively(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
+        recursiveListCount += 1
+        return try await withCheckedThrowingContinuation { recursiveContinuations.append($0) }
+    }
+
+    func waitForRecursiveRequestCount(_ count: Int) async {
+        while recursiveListCount < count { await Task.yield() }
+    }
+
+    func resolveRecursiveRequests() {
+        let continuations = recursiveContinuations
+        recursiveContinuations.removeAll()
+        let entries = [
+            SVNListEntry(name: "API-Guide.txt", kind: .file, size: 20, revision: 8, author: nil, updatedAt: nil),
+            SVNListEntry(name: "README.txt", kind: .file, size: 10, revision: 5, author: nil, updatedAt: nil)
+        ]
+        continuations.forEach { $0.resume(returning: entries) }
     }
 }
 
