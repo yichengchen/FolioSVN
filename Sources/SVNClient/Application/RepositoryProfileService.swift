@@ -5,9 +5,10 @@ struct RepositoryConnection: Sendable {
     let password: String?
 
     var requestOptions: SVNRequestOptions {
-        let credentials = profile.username.isEmpty && password == nil
+        let normalizedPassword = password.flatMap { $0.isEmpty ? nil : $0 }
+        let credentials = profile.username.isEmpty && normalizedPassword == nil
             ? nil
-            : SVNCredentials(username: profile.username, password: password ?? "")
+            : SVNCredentials(username: profile.username, password: normalizedPassword ?? "")
         return SVNRequestOptions(
             credentials: credentials,
             certificateTrustPolicy: profile.certificatePolicy.svnPolicy
@@ -52,7 +53,11 @@ actor RepositoryProfileService {
     func save(profile: RepositoryProfile, password: String) async throws {
         let previousPassword = try await credentialStore.password(for: profile.id)
         do {
-            try await credentialStore.save(password: password, for: profile.id)
+            if profile.username.isEmpty && password.isEmpty {
+                try await credentialStore.removePassword(for: profile.id)
+            } else {
+                try await credentialStore.save(password: password, for: profile.id)
+            }
             try await profileStore.upsert(profile)
         } catch {
             if let previousPassword {

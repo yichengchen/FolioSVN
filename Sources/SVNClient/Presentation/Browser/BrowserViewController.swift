@@ -961,12 +961,32 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             return
         }
 
-        let targetRows: [BrowserRow]
-        if let targetDirectory {
-            targetRows = targetDirectory.children?.map(\.row) ?? []
-        } else {
-            targetRows = viewModel.rows
+        if let targetDirectory, targetDirectory.children == nil {
+            run {
+                let targetRows = try await self.viewModel.rows(in: targetDirectory.row.url)
+                guard self.canModifyRepository, self.treeContains(targetDirectory) else { return }
+                self.prepareUpload(
+                    files: files,
+                    targetDirectory: targetDirectory,
+                    targetRows: targetRows
+                )
+            }
+            return
         }
+
+        prepareUpload(
+            files: files,
+            targetDirectory: targetDirectory,
+            targetRows: targetDirectory?.children?.map(\.row) ?? viewModel.rows
+        )
+    }
+
+    private func prepareUpload(
+        files: [URL],
+        targetDirectory: BrowserTreeNode?,
+        targetRows: [BrowserRow]
+    ) {
+        guard canModifyRepository, !files.isEmpty else { return }
         let existing = Dictionary(uniqueKeysWithValues: targetRows.map { ($0.name, $0) })
         let remoteConflicts = files.compactMap { localURL in
             existing[localURL.lastPathComponent].map { row in (localURL, row) }
@@ -1514,7 +1534,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         let identifier = transfer.id as NSUUID
         if transfer.canCancel {
             let cancel = menu.addItem(
-                withTitle: "取消传输",
+                withTitle: transfer.kind.isWrite ? "强制停止（状态可能未知）" : "取消传输",
                 action: #selector(cancelTransfer(_:)),
                 keyEquivalent: ""
             )
@@ -1586,6 +1606,16 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
 
     @objc private func cancelTransfer(_ sender: NSMenuItem) {
         guard let transfer = transfer(from: sender) else { return }
+        if transfer.kind.isWrite {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "强制停止“\(transfer.title)”？"
+            alert.informativeText = "SVN 服务端可能已经接受提交。停止后请刷新仓库确认实际状态，避免重复提交。"
+            alert.addButton(withTitle: "强制停止")
+            alert.addButton(withTitle: "继续等待")
+            alert.buttons.first?.hasDestructiveAction = true
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         viewModel.cancelTransfer(id: transfer.id)
     }
 

@@ -1258,9 +1258,43 @@ final class BrowserViewModelTests: XCTestCase {
         try await viewModel.retryTransfer(id: failedTransfer.id)
 
         XCTAssertEqual(viewModel.transfers.first?.state, .completed)
+        XCTAssertFalse(viewModel.transfers.contains { $0.id == failedTransfer.id })
+        XCTAssertEqual(viewModel.transfers.count, 1)
+        XCTAssertFalse(viewModel.transfers.contains(where: \.canRetry))
         let exportCount = await client.exportCount
         XCTAssertEqual(exportCount, 2)
         XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
+    }
+
+    func testForceCancellingWriteUnlocksFurtherWritesAndWarnsAboutUnknownState() async throws {
+        let client = CancellableTransferSVNClient()
+        let viewModel = BrowserViewModel(svnClient: client)
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        try await viewModel.connect(to: rootURL)
+        let localFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cancelled-upload-\(UUID().uuidString).txt")
+        try Data("upload".utf8).write(to: localFile)
+        defer { try? FileManager.default.removeItem(at: localFile) }
+        let task = Task { @MainActor in
+            try await viewModel.upload(files: [localFile], message: "上传")
+        }
+        while viewModel.transfers.first?.stage != .uploadingAndCommitting { await Task.yield() }
+
+        let transfer = try XCTUnwrap(viewModel.transfers.first)
+        XCTAssertEqual(transfer.kind, .upload)
+        XCTAssertTrue(transfer.canCancel)
+        XCTAssertTrue(viewModel.hasActiveWriteTransfer)
+        viewModel.cancelTransfer(id: transfer.id)
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        XCTAssertEqual(viewModel.transfers.first?.state, .cancelled)
+        XCTAssertFalse(viewModel.hasActiveWriteTransfer)
+        XCTAssertTrue(viewModel.noticeText?.contains("状态可能未知") == true)
     }
 
     func testHistoricalDownloadAndRestoreUsePegAndCurrentRevisionSnapshot() async throws {
@@ -1601,6 +1635,16 @@ private actor CancellableTransferSVNClient: SVNClient {
         options: SVNRequestOptions
     ) async throws {
         try await Task.sleep(for: .seconds(60))
+    }
+
+    func upload(
+        files: [URL],
+        to directoryURL: URL,
+        message: String,
+        options: SVNRequestOptions
+    ) async throws -> SVNWriteResult {
+        try await Task.sleep(for: .seconds(60))
+        return SVNWriteResult(revision: 3)
     }
 }
 

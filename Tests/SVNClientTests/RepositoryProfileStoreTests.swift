@@ -46,6 +46,22 @@ final class RepositoryProfileStoreTests: XCTestCase {
         XCTAssertEqual(restoredPassword, "secret")
     }
 
+    func testEmptyPasswordKeepsAnonymousConnectionAndRemovesStoredCredential() async throws {
+        var profile = makeProfile(displayName: "公开文档")
+        profile.username = ""
+        let profiles = try RepositoryProfileStore(inMemory: ())
+        let credentials = InMemoryCredentialStore(passwords: [profile.id: "old-secret"])
+        let service = RepositoryProfileService(profileStore: profiles, credentialStore: credentials)
+
+        try await service.save(profile: profile, password: "")
+
+        let storedPassword = await credentials.passwordValue(for: profile.id)
+        XCTAssertNil(storedPassword)
+        let connection = try await service.connection(profileID: profile.id)
+        XCTAssertNil(connection?.requestOptions.credentials)
+        XCTAssertNil(RepositoryConnection(profile: profile, password: "").requestOptions.credentials)
+    }
+
     private func makeProfile(displayName: String) -> RepositoryProfile {
         RepositoryProfile(
             id: UUID(),

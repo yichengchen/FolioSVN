@@ -66,6 +66,10 @@ struct BrowserTransfer: Identifiable, Equatable, Sendable {
         case download
         case upload
         case replace
+
+        var isWrite: Bool {
+            self == .upload || self == .replace
+        }
     }
 
     enum State: Equatable, Sendable {
@@ -821,7 +825,7 @@ final class BrowserViewModel {
                 kind: .replace,
                 title: "上传 \(document.manifest.displayName) 的修改",
                 detail: "检查远端 r\(expectedRevision) 后创建新版本",
-                cancellable: false,
+                cancellable: true,
                 outputURL: nil,
                 retryRequest: nil
             ) { updateStage in
@@ -972,7 +976,7 @@ final class BrowserViewModel {
             kind: .replace,
             title: "恢复 \(history.displayName) 至 r\(revision)",
             detail: "基于当前 r\(history.currentRevision) 创建新版本",
-            cancellable: false,
+            cancellable: true,
             outputURL: nil,
             retryRequest: nil
         ) { updateStage in
@@ -1278,7 +1282,7 @@ final class BrowserViewModel {
             kind: .upload,
             title: "上传 \(files.count) 个文件",
             detail: ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file),
-            cancellable: false,
+            cancellable: true,
             outputURL: nil,
             retryRequest: nil
         ) { updateStage in
@@ -1304,7 +1308,7 @@ final class BrowserViewModel {
             kind: .replace,
             title: "替换 \(row.name)",
             detail: localSize,
-            cancellable: false,
+            cancellable: true,
             outputURL: nil,
             retryRequest: nil
         ) { updateStage in
@@ -1593,6 +1597,10 @@ final class BrowserViewModel {
             return result
         } catch is CancellationError {
             finishTransfer(id: id, state: .cancelled)
+            if kind.isWrite {
+                noticeText = "写入任务已停止 · SVN 提交状态可能未知，请刷新仓库确认"
+                onChange?()
+            }
             throw CancellationError()
         } catch {
             finishTransfer(id: id, state: .failed(error.localizedDescription))
@@ -1611,9 +1619,12 @@ final class BrowserViewModel {
     }
 
     func retryTransfer(id: UUID) async throws {
-        guard let retryRequest = transfers.first(where: { $0.id == id && $0.canRetry })?.retryRequest else {
+        guard let index = transfers.firstIndex(where: { $0.id == id && $0.canRetry }),
+              let retryRequest = transfers[index].retryRequest else {
             throw SVNClientError.unsupportedOperation
         }
+        transfers.remove(at: index)
+        onChange?()
         switch retryRequest {
         case let .download(request, destinationURL, overwrite):
             try await download(request, to: destinationURL, overwrite: overwrite)
