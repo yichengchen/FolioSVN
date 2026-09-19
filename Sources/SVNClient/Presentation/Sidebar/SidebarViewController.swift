@@ -23,6 +23,7 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
     private var isRestoringState = false
     private var isSelectingContextMenuItem = false
     private var shouldActivateRestoredSelection = false
+    private var directoryLoadTasks: [String: (id: UUID, task: Task<Void, Never>)] = [:]
 
     init(userDefaults: UserDefaults = .standard) {
         stateStore = SidebarStateStore(userDefaults: userDefaults)
@@ -232,12 +233,15 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
     }
 
     private func rebuildRoots() {
+        directoryLoadTasks.values.forEach { $0.task.cancel() }
+        directoryLoadTasks.removeAll()
         rootNodes = SidebarItem.roots(profiles: profiles, favorites: favorites)
         outlineView.reloadData()
         restoreOutlineState()
     }
 
     func invalidateDirectory(profileID: UUID, url: URL) {
+        cancelDirectoryLoad(profileID: profileID, url: url)
         guard let item = findItem(where: {
             $0.repositoryLocation?.profileID == profileID && $0.repositoryLocation?.url == url
         }) else { return }
@@ -251,6 +255,7 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
     }
 
     func updateDirectory(profileID: UUID, url: URL, entries: [SVNListEntry]) {
+        cancelDirectoryLoad(profileID: profileID, url: url)
         guard let item = findItem(where: {
             $0.repositoryLocation?.profileID == profileID && $0.repositoryLocation?.url == url
         }) else { return }
@@ -409,20 +414,47 @@ extension SidebarViewController: NSOutlineViewDelegate {
         guard !item.isLoadingChildren,
               let location = item.repositoryLocation,
               let onLoadDirectories else { return }
+        let key = directoryLoadKey(profileID: location.profileID, url: location.url)
+        guard directoryLoadTasks[key] == nil else { return }
+        let requestID = UUID()
         item.isLoadingChildren = true
-        Task { @MainActor [weak self, weak item] in
+        let task = Task { @MainActor [weak self, weak item] in
             guard let self, let item else { return }
             do {
                 let directories = try await onLoadDirectories(location.profileID, location.url)
-                guard self.findItem(where: { $0 === item }) != nil else { return }
+                try Task.checkCancellation()
+                guard self.directoryLoadTasks[key]?.id == requestID,
+                      self.findItem(where: { $0 === item }) != nil else { return }
+                self.directoryLoadTasks.removeValue(forKey: key)
+                item.isLoadingChildren = false
                 self.applyDirectories(directories, to: item, profileID: location.profileID)
+            } catch is CancellationError {
+                guard self.directoryLoadTasks[key]?.id == requestID else { return }
+                self.directoryLoadTasks.removeValue(forKey: key)
+                item.isLoadingChildren = false
             } catch {
+                guard self.directoryLoadTasks[key]?.id == requestID,
+                      self.findItem(where: { $0 === item }) != nil else { return }
+                self.directoryLoadTasks.removeValue(forKey: key)
+                item.isLoadingChildren = false
                 item.children = [SidebarItem("无法读取", subtitle: error.localizedDescription, symbolName: "exclamationmark.triangle", kind: .emptyState)]
+                outlineView.reloadItem(item, reloadChildren: true)
+                self.restoreOutlineState()
             }
-            item.isLoadingChildren = false
-            outlineView.reloadItem(item, reloadChildren: true)
-            self.restoreOutlineState()
         }
+        directoryLoadTasks[key] = (requestID, task)
+    }
+
+    private func cancelDirectoryLoad(profileID: UUID, url: URL) {
+        let key = directoryLoadKey(profileID: profileID, url: url)
+        directoryLoadTasks.removeValue(forKey: key)?.task.cancel()
+        findItem(where: {
+            $0.repositoryLocation?.profileID == profileID && $0.repositoryLocation?.url == url
+        })?.isLoadingChildren = false
+    }
+
+    private func directoryLoadKey(profileID: UUID, url: URL) -> String {
+        profileID.uuidString + ":" + url.absoluteString
     }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {

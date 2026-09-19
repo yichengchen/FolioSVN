@@ -170,6 +170,8 @@ final class BrowserViewModel {
     private let svnClient: any SVNClient
     private let metadataService: RepositoryMetadataService?
     private let cacheRootURL: URL?
+    private let openDocumentSessionID = UUID()
+    private static let abandonedOpenDocumentRetention: TimeInterval = 7 * 24 * 60 * 60
     private var backgroundDirectoryTasks: [URL: (id: UUID, task: Task<Void, Never>)] = [:]
 
     var activeTransferCount: Int {
@@ -180,6 +182,7 @@ final class BrowserViewModel {
         self.svnClient = svnClient
         self.metadataService = metadataService
         self.cacheRootURL = cacheRootURL
+        try? cleanupAbandonedOpenDocumentCopies()
     }
 
     func connect(to url: URL, options: SVNRequestOptions = .anonymous) async throws {
@@ -1306,6 +1309,7 @@ final class BrowserViewModel {
 
     private func editableCopy(of snapshotURL: URL) throws -> URL {
         let directory = try managedCacheRoot().appendingPathComponent("OpenDocuments", isDirectory: true)
+            .appendingPathComponent(openDocumentSessionID.uuidString, isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let copyURL = directory.appendingPathComponent(snapshotURL.lastPathComponent)
@@ -1317,6 +1321,45 @@ final class BrowserViewModel {
             try? FileManager.default.removeItem(at: directory)
             throw error
         }
+    }
+
+    func cleanupOpenDocumentCopies() {
+        guard let sessionURL = try? openDocumentSessionURL() else { return }
+        try? FileManager.default.removeItem(at: sessionURL)
+        removeOpenDocumentsRootIfEmpty(sessionURL.deletingLastPathComponent())
+    }
+
+    private func cleanupAbandonedOpenDocumentCopies(now: Date = .now) throws {
+        let root = try openDocumentsRootURL()
+        guard FileManager.default.fileExists(atPath: root.path) else { return }
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey, .creationDateKey, .isDirectoryKey]
+        let directories = try FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        )
+        let expirationDate = now.addingTimeInterval(-Self.abandonedOpenDocumentRetention)
+        for directory in directories where directory.lastPathComponent != openDocumentSessionID.uuidString {
+            let values = try? directory.resourceValues(forKeys: keys)
+            guard values?.isDirectory == true,
+                  let modifiedAt = values?.contentModificationDate ?? values?.creationDate,
+                  modifiedAt < expirationDate else { continue }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        removeOpenDocumentsRootIfEmpty(root)
+    }
+
+    private func openDocumentsRootURL() throws -> URL {
+        try managedCacheRoot().appendingPathComponent("OpenDocuments", isDirectory: true)
+    }
+
+    private func openDocumentSessionURL() throws -> URL {
+        try openDocumentsRootURL().appendingPathComponent(openDocumentSessionID.uuidString, isDirectory: true)
+    }
+
+    private func removeOpenDocumentsRootIfEmpty(_ root: URL) {
+        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: root.path), contents.isEmpty else { return }
+        try? FileManager.default.removeItem(at: root)
     }
 
     var statusText: String {

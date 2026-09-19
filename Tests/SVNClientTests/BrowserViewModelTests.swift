@@ -236,6 +236,27 @@ final class BrowserViewModelTests: XCTestCase {
         try await assertBackgroundCacheReplacement(clearCache: true)
     }
 
+    func testCredentialCacheInvalidationCancelsAnOlderDirectoryRefresh() async throws {
+        let metadata = RepositoryMetadataService(store: try RepositoryMetadataStore(inMemory: ()))
+        let client = ControlledListSVNClient()
+        let url = URL(string: "https://example.com/private")!
+        let profileID = UUID()
+        let refresh = Task {
+            try await metadata.refreshDirectoryCache(profileID: profileID, url: url) {
+                try await client.list(url: url, options: .anonymous)
+            }
+        }
+        await client.waitForRequest(url)
+
+        try await metadata.clearRepositoryCache(profileID: profileID)
+        await client.resolve(url, result: .success(StabilitySVNClient.entries))
+
+        do { _ = try await refresh.value; XCTFail("Expected old-credential refresh cancellation") }
+        catch is CancellationError {}
+        let snapshot = try await metadata.directoryCache(profileID: profileID, url: url)
+        XCTAssertNil(snapshot)
+    }
+
     func testExplicitCacheReplacementWinsOverLateBackgroundResult() async throws {
         try await assertBackgroundCacheReplacement(clearCache: false)
     }
@@ -494,8 +515,19 @@ final class BrowserViewModelTests: XCTestCase {
     func testEditableOpenCopiesCannotContaminateHistoricalSnapshots() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("snapshot-test-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
+        let openDocumentsRoot = root.appendingPathComponent("OpenDocuments", isDirectory: true)
+        let abandoned = openDocumentsRoot.appendingPathComponent("abandoned", isDirectory: true)
+        let recent = openDocumentsRoot.appendingPathComponent("recent", isDirectory: true)
+        try FileManager.default.createDirectory(at: abandoned, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: recent, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-8 * 24 * 60 * 60)],
+            ofItemAtPath: abandoned.path
+        )
         let client = StabilitySVNClient()
         let model = BrowserViewModel(svnClient: client, cacheRootURL: root)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: abandoned.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recent.path))
         try await model.connect(to: URL(string: "https://example.com/root")!)
         let row = try XCTUnwrap(model.rows.first(where: { $0.kind == .file }))
         let history = BrowserFileHistory(profileID: try XCTUnwrap(model.session?.profileID),
@@ -513,6 +545,11 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertEqual(permissions?.intValue, 0o444)
         let exports = await client.exportCount
         XCTAssertEqual(exports, 1, "An immutable snapshot is still reusable")
+        let sessionDirectory = firstCopy.deletingLastPathComponent().deletingLastPathComponent()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sessionDirectory.path))
+        model.cleanupOpenDocumentCopies()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sessionDirectory.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recent.path), "Cleanup must only remove this app session")
     }
 
     func testSnapshotCacheIncludesFullSourceURLWhenProfileIsEdited() async throws {

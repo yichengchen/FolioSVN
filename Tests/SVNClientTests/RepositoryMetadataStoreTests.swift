@@ -189,6 +189,41 @@ final class RepositoryMetadataStoreTests: XCTestCase {
         XCTAssertNil(loadedStale)
     }
 
+    func testClearingRepositoryCacheRemovesPermissionSensitiveDataButPreservesFavorites() async throws {
+        let store = try RepositoryMetadataStore(inMemory: ())
+        let profileID = UUID()
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo/"))
+        let favorite = makeFavorite(profileID: profileID, path: "共享/说明.txt")
+        try await store.upsertFavorite(favorite)
+        try await store.replaceSearchIndex(
+            profileID: profileID,
+            rootURL: rootURL,
+            entries: [makeIndexEntry(profileID: profileID, rootURL: rootURL, path: "私密/工资.xlsx")],
+            indexedAt: .now
+        )
+        try await store.replaceDirectoryCache(
+            profileID: profileID,
+            url: rootURL,
+            entries: [SVNListEntry(name: "私密", kind: .directory, size: nil, revision: 8, author: nil, updatedAt: nil)],
+            cachedAt: .now
+        )
+
+        try await store.clearRepositoryCache(profileID: profileID)
+
+        let directoryCache = try await store.directoryCache(profileID: profileID, url: rootURL)
+        XCTAssertNil(directoryCache)
+        let search = try await store.searchIndex(
+            profileID: profileID,
+            rootURL: rootURL,
+            directoryURL: nil,
+            query: "工资"
+        )
+        XCTAssertTrue(search.entries.isEmpty)
+        XCTAssertNil(search.indexedAt)
+        let favorites = try await store.favorites()
+        XCTAssertEqual(favorites, [favorite])
+    }
+
     func testMetadataMigrationsShareTheApplicationDatabaseWithProfileMigrations() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("SVNClientMetadataTests-\(UUID().uuidString).sqlite")

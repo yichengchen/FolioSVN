@@ -90,8 +90,10 @@ final class MainCoordinator {
                     }
                 }
             } else {
-                entries = try await svnClient.list(url: url, options: connection.requestOptions)
-                try? await metadataService.replaceDirectoryCache(profileID: profileID, url: url, entries: entries)
+                let snapshot = try await metadataService.refreshDirectoryCache(profileID: profileID, url: url) {
+                    try await self.svnClient.list(url: url, options: connection.requestOptions)
+                }
+                entries = snapshot.entries
             }
             return entries
                 .filter { $0.kind == .directory }
@@ -194,6 +196,9 @@ final class MainCoordinator {
                 updatedAt: now
             )
             _ = try await self.svnClient.list(url: profile.startURL, options: draft.requestOptions)
+            // The profile ID survives edits, but its credentials and visible tree may not.
+            // Reconnecting must never reuse directory or search data read by the old account.
+            try await self.metadataService.clearRepositoryCache(profileID: profile.id)
             try await self.profileService.save(profile: profile, password: draft.password)
             try await browserViewModel.connect(profile: profile, password: draft.password)
             await self.reloadRepositoryProfiles()
@@ -394,6 +399,10 @@ final class MainCoordinator {
         } else {
             alert.runModal()
         }
+    }
+
+    func cleanupOpenDocumentCopies() {
+        browserViewModel?.cleanupOpenDocumentCopies()
     }
 }
 

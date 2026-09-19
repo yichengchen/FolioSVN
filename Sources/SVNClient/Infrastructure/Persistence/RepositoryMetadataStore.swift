@@ -17,6 +17,7 @@ protocol RepositoryMetadataStoring: Sendable {
     func directoryCache(profileID: UUID, url: URL) async throws -> DirectoryCacheSnapshot?
     func replaceDirectoryCache(profileID: UUID, url: URL, entries: [SVNListEntry], cachedAt: Date) async throws
     func clearDirectoryCache(profileID: UUID) async throws
+    func clearRepositoryCache(profileID: UUID) async throws
     func deleteMetadata(profileID: UUID) async throws
 }
 
@@ -258,6 +259,14 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
         try databaseQueue.write { database in
             _ = try DirectoryCacheEntryRecord.filter(Column("profileID") == profileID.uuidString).deleteAll(database)
             _ = try DirectoryCacheStateRecord.filter(Column("profileID") == profileID.uuidString).deleteAll(database)
+        }
+    }
+
+    func clearRepositoryCache(profileID: UUID) throws {
+        try databaseQueue.write { database in
+            for table in ["searchIndex", "searchIndexStates", "directoryCacheEntries", "directoryCacheStates"] {
+                try database.execute(sql: "DELETE FROM \(table) WHERE profileID = ?", arguments: [profileID.uuidString])
+            }
         }
     }
 

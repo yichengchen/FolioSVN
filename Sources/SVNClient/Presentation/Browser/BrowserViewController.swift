@@ -29,6 +29,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private var uploadHereMenuItem: NSMenuItem?
     private var newFolderHereMenuItem: NSMenuItem?
     private var operationTask: Task<Void, Never>?
+    private var operationTaskID: UUID?
     private var searchTask: Task<Void, Never>?
     private var quickLookTask: Task<Void, Never>?
     private var quickLookURL: URL?
@@ -1263,6 +1264,8 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     }
 
     private func run(_ operation: @escaping @MainActor () async throws -> Void) {
+        let taskID = UUID()
+        operationTaskID = taskID
         operationTask = Task { @MainActor [weak self] in
             do {
                 try await operation()
@@ -1271,7 +1274,9 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             } catch {
                 self?.presentError(message: error.localizedDescription)
             }
+            guard self?.operationTaskID == taskID else { return }
             self?.operationTask = nil
+            self?.operationTaskID = nil
         }
     }
 

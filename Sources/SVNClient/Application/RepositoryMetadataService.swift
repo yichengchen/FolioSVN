@@ -148,6 +148,11 @@ actor RepositoryMetadataService {
         try await store.clearDirectoryCache(profileID: profileID)
     }
 
+    func clearRepositoryCache(profileID: UUID) async throws {
+        cancelDirectoryRefreshes(profileID: profileID)
+        try await store.clearRepositoryCache(profileID: profileID)
+    }
+
     // Coalesce background reads shared by the sidebar, the page and expanded folders.
     func refreshDirectoryCache(
         profileID: UUID, url: URL,

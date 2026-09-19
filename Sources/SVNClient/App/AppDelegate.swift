@@ -38,6 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return alert.runModal() == .alertFirstButtonReturn ? .terminateCancel : .terminateNow
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        coordinator?.cleanupOpenDocumentCopies()
+    }
+
     private func installMainMenu() {
         let mainMenu = NSMenu()
 
