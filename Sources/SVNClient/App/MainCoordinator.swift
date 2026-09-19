@@ -269,8 +269,12 @@ final class MainCoordinator {
             guard let self else { return }
             defer { if requestID == connectionRequestID { connectionTask = nil } }
             do {
-                guard let connection = try await profileService.connection(profileID: profileID),
-                      let browserViewModel else { return }
+                guard let browserViewModel else { return }
+                guard let connection = try await profileService.connection(profileID: profileID) else {
+                    guard requestID == connectionRequestID else { return }
+                    sidebarViewController?.clearSelection(profileID: profileID)
+                    return
+                }
                 try Task.checkCancellation()
                 guard requestID == connectionRequestID else { return }
                 try await browserViewModel.connect(
@@ -280,8 +284,11 @@ final class MainCoordinator {
                 )
             } catch is CancellationError {
                 // A newer sidebar selection or the cancellation button superseded this connection.
+                guard requestID == connectionRequestID else { return }
+                sidebarViewController?.clearSelection(profileID: profileID)
             } catch {
                 guard requestID == connectionRequestID else { return }
+                sidebarViewController?.clearSelection(profileID: profileID)
                 presentError(title: "无法连接服务器", error: error)
             }
         }

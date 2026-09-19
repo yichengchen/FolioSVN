@@ -132,7 +132,7 @@ final class BrowserViewModelTests: XCTestCase {
             entries: StabilitySVNClient.entries, cachedAt: .now.addingTimeInterval(-age))
         let model = BrowserViewModel(svnClient: client, metadataService: metadata)
         try await model.connect(session: RepositorySession(profileID: profileID, displayName: "Cache",
-            baseURL: url, searchRootURL: url, options: .anonymous))
+            baseURL: url, options: .anonymous))
         return (model, client, metadata, url)
     }
 
@@ -202,7 +202,7 @@ final class BrowserViewModelTests: XCTestCase {
         let root = URL(string: "https://example.com/root")!
         let child = URL(string: "https://example.com/root/expired")!
         let profileID = UUID()
-        let session = RepositorySession(profileID: profileID, displayName: "Tree", baseURL: root, searchRootURL: root, options: .anonymous)
+        let session = RepositorySession(profileID: profileID, displayName: "Tree", baseURL: root, options: .anonymous)
         let first = BrowserViewModel(svnClient: client, metadataService: metadata)
         let second = BrowserViewModel(svnClient: client, metadataService: metadata)
         try await first.connect(session: session)
@@ -238,6 +238,32 @@ final class BrowserViewModelTests: XCTestCase {
 
     func testExplicitCacheReplacementWinsOverLateBackgroundResult() async throws {
         try await assertBackgroundCacheReplacement(clearCache: false)
+    }
+
+    func testSearchIndexHydrationCancelsOlderBackgroundDirectoryRefresh() async throws {
+        let metadata = RepositoryMetadataService(store: try RepositoryMetadataStore(inMemory: ()))
+        let client = ControlledListSVNClient()
+        let profileID = UUID()
+        let root = URL(string: "https://example.com/root/")!
+        let child = root.appendingPathComponent("folder", isDirectory: true)
+        let refresh = Task {
+            try await metadata.refreshDirectoryCache(profileID: profileID, url: child) {
+                try await client.list(url: child, options: .anonymous)
+            }
+        }
+        await client.waitForRequest(child)
+        let directory = SearchIndexEntry(profileID: profileID, rootURL: root, url: child,
+            name: "folder", kind: .directory, size: nil, revision: 9, author: nil, modifiedAt: nil)
+        let file = SearchIndexEntry(profileID: profileID, rootURL: root,
+            url: child.appendingPathComponent("fresh.txt"), name: "fresh.txt", kind: .file,
+            size: 3, revision: 10, author: nil, modifiedAt: nil)
+        try await metadata.replaceSearchIndex(profileID: profileID, rootURL: root,
+            entries: [directory, file])
+        await client.resolve(child, result: .success([]))
+        do { _ = try await refresh.value; XCTFail("Expected older directory refresh cancellation") }
+        catch is CancellationError {}
+        let cache = try await metadata.directoryCache(profileID: profileID, url: child)
+        XCTAssertEqual(cache?.entries.map(\.name), ["fresh.txt"])
     }
 
     private func assertBackgroundCacheReplacement(clearCache: Bool) async throws {
@@ -498,7 +524,7 @@ final class BrowserViewModelTests: XCTestCase {
         for host in ["first.example", "second.example"] {
             let url = URL(string: "https://\(host)/root")!
             try await model.connect(session: RepositorySession(profileID: profileID, displayName: host,
-                baseURL: url, searchRootURL: url, options: .anonymous))
+                baseURL: url, options: .anonymous))
             _ = try await model.localSnapshotURL(for: try XCTUnwrap(model.rows.first(where: { $0.kind == .file })))
         }
         let exports = await client.exportCount
@@ -694,11 +720,11 @@ final class BrowserViewModelTests: XCTestCase {
         try await viewModel.connect(profile: profile, password: nil)
         let technicalDirectory = try XCTUnwrap(viewModel.rows.first(where: { $0.name == "技术部" }))
         try await viewModel.openDirectory(technicalDirectory)
-        try await viewModel.search(query: "api", scope: .currentDirectory)
+        try await viewModel.search(query: "api")
 
         XCTAssertTrue(viewModel.isShowingSearchResults)
         XCTAssertEqual(viewModel.rows.map(\.name), ["API-Guide.txt"])
-        XCTAssertEqual(viewModel.rows.first?.location, "技术部")
+        XCTAssertEqual(viewModel.rows.first?.location, "")
         XCTAssertNotNil(viewModel.searchIndexedAt)
         XCTAssertTrue(viewModel.statusText.contains("索引更新于"))
         let firstRecursiveListCount = await client.recursiveListCount
@@ -709,10 +735,28 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertEqual(liveInfoCount, 1, "Opening an indexed result must validate it against the server")
         XCTAssertEqual(liveExportRevision, 5, "The validated live revision must replace the stale indexed revision")
 
-        try await viewModel.search(query: "api", scope: .configuredRoot)
+        viewModel.clearSearch()
+        try await viewModel.navigate(to: rootURL)
+        try await viewModel.search(query: "api")
         XCTAssertEqual(Set(viewModel.rows.map(\.name)), ["API-Guide.txt", "api-plan.txt"])
         let secondRecursiveListCount = await client.recursiveListCount
-        XCTAssertEqual(secondRecursiveListCount, 1, "Subsequent searches must use the local index")
+        XCTAssertEqual(secondRecursiveListCount, 2, "Each current directory owns its local index")
+        viewModel.clearSearch()
+        XCTAssertEqual(Set(viewModel.rows.map(\.name)), ["技术部", "市场部", "README.txt"],
+            "The recursive index must refresh the visible directory cache")
+        try await viewModel.search(query: "api")
+        let repeatedRecursiveListCount = await client.recursiveListCount
+        XCTAssertEqual(repeatedRecursiveListCount, 2, "A repeated search in the same directory reuses its index")
+        try await metadata.replaceSearchIndex(
+            profileID: profile.id,
+            rootURL: rootURL,
+            entries: [],
+            indexedAt: .now.addingTimeInterval(-26 * 60)
+        )
+        try await viewModel.search(query: "api")
+        let expiredRecursiveListCount = await client.recursiveListCount
+        XCTAssertEqual(expiredRecursiveListCount, 3, "An expired index rebuilds automatically without a toolbar button")
+        XCTAssertEqual(Set(viewModel.rows.map(\.name)), ["API-Guide.txt", "api-plan.txt"])
     }
 
     func testFavoritesArePersistedAndReflectedSynchronouslyInTheContextMenuState() async throws {
@@ -1178,10 +1222,18 @@ private actor SearchSVNClient: SVNClient {
 
     func listRecursively(url: URL, options: SVNRequestOptions) async throws -> [SVNListEntry] {
         recursiveListCount += 1
+        if url.path.hasSuffix("技术部") || url.path.hasSuffix("技术部/") {
+            return [SVNListEntry(
+                name: "API-Guide.txt", kind: .file, size: 20, revision: 8,
+                author: "tester", updatedAt: Date(timeIntervalSince1970: 300)
+            )]
+        }
         return [
             SVNListEntry(name: "技术部", kind: .directory, size: nil, revision: 7, author: "tester", updatedAt: nil),
             SVNListEntry(name: "技术部/API-Guide.txt", kind: .file, size: 20, revision: 8, author: "tester", updatedAt: nil),
-            SVNListEntry(name: "市场部/api-plan.txt", kind: .file, size: 30, revision: 9, author: "tester", updatedAt: nil)
+            SVNListEntry(name: "市场部", kind: .directory, size: nil, revision: 9, author: "tester", updatedAt: nil),
+            SVNListEntry(name: "市场部/api-plan.txt", kind: .file, size: 30, revision: 9, author: "tester", updatedAt: nil),
+            SVNListEntry(name: "README.txt", kind: .file, size: 10, revision: 5, author: "tester", updatedAt: nil)
         ]
     }
 

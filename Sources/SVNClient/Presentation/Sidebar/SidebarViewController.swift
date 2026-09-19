@@ -225,6 +225,12 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
         restoreOutlineState()
     }
 
+    func clearSelection(profileID: UUID) {
+        guard selectedSidebarItem?.repositoryProfileID == profileID else { return }
+        outlineView.deselectAll(nil)
+        stateStore.setSelected(key: nil)
+    }
+
     private func rebuildRoots() {
         rootNodes = SidebarItem.roots(profiles: profiles, favorites: favorites)
         outlineView.reloadData()

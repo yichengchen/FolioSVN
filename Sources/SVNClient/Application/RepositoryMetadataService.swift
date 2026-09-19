@@ -102,6 +102,7 @@ actor RepositoryMetadataService {
         entries: [SearchIndexEntry],
         indexedAt: Date = .now
     ) async throws {
+        cancelDirectoryRefreshes(profileID: profileID, atOrBelow: rootURL)
         try await store.replaceSearchIndex(profileID: profileID, rootURL: rootURL, entries: entries, indexedAt: indexedAt)
     }
 
@@ -177,6 +178,15 @@ actor RepositoryMetadataService {
 
     private func cancelDirectoryRefreshes(profileID: UUID) {
         for key in Array(directoryRefreshes.keys) where key.hasPrefix(profileID.uuidString + ":") {
+            directoryRefreshes.removeValue(forKey: key)?.task.cancel()
+        }
+    }
+
+    private func cancelDirectoryRefreshes(profileID: UUID, atOrBelow rootURL: URL) {
+        let rootKey = profileID.uuidString + ":" + rootURL.absoluteString
+        let prefix = profileID.uuidString + ":" + (rootURL.absoluteString.hasSuffix("/")
+            ? rootURL.absoluteString : rootURL.absoluteString + "/")
+        for key in Array(directoryRefreshes.keys) where key == rootKey || key.hasPrefix(prefix) {
             directoryRefreshes.removeValue(forKey: key)?.task.cancel()
         }
     }

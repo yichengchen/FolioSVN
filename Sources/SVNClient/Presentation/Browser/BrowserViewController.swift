@@ -116,9 +116,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     }
     func createFolder() { promptForNewFolder() }
     func uploadFiles() { chooseFilesForUpload() }
-    func refreshSearchIndex() { run { try await self.viewModel.refreshSearchIndex() } }
-
-    func updateSearch(query: String, scope: BrowserViewModel.SearchScope) {
+    func updateSearch(query: String) {
         searchTask?.cancel()
         if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             viewModel.clearSearch()
@@ -128,7 +126,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             do {
                 try await Task.sleep(for: .milliseconds(250))
                 guard let self else { return }
-                try await viewModel.search(query: query, scope: scope)
+                try await viewModel.search(query: query)
             } catch is CancellationError {
                 // A newer keystroke superseded this query.
             } catch {

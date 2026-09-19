@@ -4,10 +4,9 @@ final class MainWindowController: NSWindowController {
     var onConnectRepository: (() -> Void)?
     private let browserViewController: BrowserViewController
     private let searchField = NSSearchField()
-    private let searchScopeControl = NSSegmentedControl(labels: ["当前目录", "配置范围"], trackingMode: .selectOne, target: nil, action: nil)
 
     private enum ToolbarIdentifier {
-        static let main = NSToolbar.Identifier("MainToolbarV15")
+        static let main = NSToolbar.Identifier("MainToolbarV16")
         static let connect = NSToolbarItem.Identifier("ConnectRepository")
         static let back = NSToolbarItem.Identifier("Back")
         static let forward = NSToolbarItem.Identifier("Forward")
@@ -15,8 +14,6 @@ final class MainWindowController: NSWindowController {
         static let newFolder = NSToolbarItem.Identifier("NewFolder")
         static let upload = NSToolbarItem.Identifier("Upload")
         static let search = NSToolbarItem.Identifier("Search")
-        static let searchScope = NSToolbarItem.Identifier("SearchScope")
-        static let refreshIndex = NSToolbarItem.Identifier("RefreshSearchIndex")
     }
 
     init(sidebarViewController: SidebarViewController, browserViewController: BrowserViewController) {
@@ -42,13 +39,10 @@ final class MainWindowController: NSWindowController {
         splitViewController.splitView.setPosition(240, ofDividerAt: 0)
 
         super.init(window: window)
-        searchField.placeholderString = "搜索文件名"
+        searchField.placeholderString = "搜索当前目录"
         searchField.target = self
         searchField.action = #selector(searchChanged)
         searchField.sendsSearchStringImmediately = true
-        searchScopeControl.selectedSegment = 1
-        searchScopeControl.target = self
-        searchScopeControl.action = #selector(searchScopeChanged)
         searchField.widthAnchor.constraint(equalToConstant: 230).isActive = true
         window.toolbar = makeToolbar()
         window.toolbarStyle = .unified
@@ -82,14 +76,9 @@ final class MainWindowController: NSWindowController {
     @objc private func uploadFiles() { browserViewController.uploadFiles() }
     @objc private func connectRepository() { onConnectRepository?() }
     @objc private func searchChanged() { performSearch() }
-    @objc private func searchScopeChanged() { performSearch() }
-    @objc private func refreshSearchIndex() { browserViewController.refreshSearchIndex() }
 
     private func performSearch() {
-        let scope: BrowserViewModel.SearchScope = searchScopeControl.selectedSegment == 0
-            ? .currentDirectory
-            : .configuredRoot
-        browserViewController.updateSearch(query: searchField.stringValue, scope: scope)
+        browserViewController.updateSearch(query: searchField.stringValue)
     }
 }
 
@@ -102,7 +91,7 @@ extension MainWindowController: NSToolbarItemValidation {
             return browserViewController.canGoForward
         case ToolbarIdentifier.refresh, ToolbarIdentifier.newFolder, ToolbarIdentifier.upload:
             return browserViewController.canModifyRepository
-        case ToolbarIdentifier.search, ToolbarIdentifier.searchScope, ToolbarIdentifier.refreshIndex:
+        case ToolbarIdentifier.search:
             return browserViewController.hasRepositoryConnection
         default:
             return true
@@ -116,7 +105,7 @@ extension MainWindowController: NSToolbarDelegate {
             .toggleSidebar, ToolbarIdentifier.connect,
             ToolbarIdentifier.back, ToolbarIdentifier.forward,
             ToolbarIdentifier.refresh, .flexibleSpace,
-            ToolbarIdentifier.search, ToolbarIdentifier.searchScope, ToolbarIdentifier.refreshIndex,
+            ToolbarIdentifier.search,
             ToolbarIdentifier.newFolder, ToolbarIdentifier.upload, .space
         ]
     }
@@ -126,7 +115,7 @@ extension MainWindowController: NSToolbarDelegate {
             .toggleSidebar, ToolbarIdentifier.connect,
             ToolbarIdentifier.back, ToolbarIdentifier.forward,
             ToolbarIdentifier.refresh, .flexibleSpace,
-            ToolbarIdentifier.search, ToolbarIdentifier.searchScope, ToolbarIdentifier.refreshIndex,
+            ToolbarIdentifier.search,
             ToolbarIdentifier.newFolder, ToolbarIdentifier.upload
         ]
     }
@@ -185,18 +174,6 @@ extension MainWindowController: NSToolbarDelegate {
             item.paletteLabel = "搜索文件名"
             item.view = searchField
             return item
-        case ToolbarIdentifier.searchScope:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "搜索范围"
-            item.view = searchScopeControl
-            return item
-        case ToolbarIdentifier.refreshIndex:
-            return makeToolbarItem(
-                identifier: itemIdentifier,
-                label: "更新索引",
-                symbolName: "arrow.trianglehead.2.clockwise.rotate.90",
-                action: #selector(refreshSearchIndex)
-            )
         default:
             return nil
         }

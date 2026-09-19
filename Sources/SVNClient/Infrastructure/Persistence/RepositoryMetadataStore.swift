@@ -128,6 +128,7 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
         entries: [SearchIndexEntry],
         indexedAt: Date
     ) throws {
+        let directoryCaches = Self.directoryCaches(rootURL: rootURL, entries: entries)
         try databaseQueue.write { database in
             _ = try SearchIndexRecord
                 .filter(Column("profileID") == profileID.uuidString && Column("rootURL") == rootURL.absoluteString)
@@ -141,6 +142,23 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
                 rootURL: rootURL.absoluteString,
                 indexedAt: indexedAt
             ).save(database)
+
+            // The recursive response is also a complete snapshot of every directory
+            // below the search root. Replace that subtree atomically with the index.
+            let rootValue = rootURL.absoluteString
+            let rootPrefix = Self.directoryPrefix(rootURL)
+            let oldDirectoryURLs = try DirectoryCacheStateRecord
+                .filter(Column("profileID") == profileID.uuidString)
+                .fetchAll(database)
+                .map(\.directoryURL)
+                .filter { $0 == rootValue || $0.hasPrefix(rootPrefix) }
+            for directoryURL in oldDirectoryURLs {
+                try Self.deleteDirectoryCache(database: database, profileID: profileID, directoryURL: directoryURL)
+            }
+            for (directoryURL, directoryEntries) in directoryCaches {
+                try Self.writeDirectoryCache(database: database, profileID: profileID,
+                    directoryURL: directoryURL, entries: directoryEntries, cachedAt: indexedAt)
+            }
         }
     }
 
@@ -231,23 +249,8 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
         cachedAt: Date
     ) throws {
         try databaseQueue.write { database in
-            _ = try DirectoryCacheEntryRecord
-                .filter(Column("profileID") == profileID.uuidString && Column("directoryURL") == url.absoluteString)
-                .deleteAll(database)
-            for (position, entry) in entries.enumerated() {
-                var record = DirectoryCacheEntryRecord(
-                    profileID: profileID.uuidString,
-                    directoryURL: url.absoluteString,
-                    position: position,
-                    entry: entry
-                )
-                try record.insert(database)
-            }
-            try DirectoryCacheStateRecord(
-                profileID: profileID.uuidString,
-                directoryURL: url.absoluteString,
-                cachedAt: cachedAt
-            ).save(database)
+            try Self.writeDirectoryCache(database: database, profileID: profileID,
+                directoryURL: url, entries: entries, cachedAt: cachedAt)
         }
     }
 
@@ -268,6 +271,68 @@ actor RepositoryMetadataStore: RepositoryMetadataStoring {
 
     private static func directoryPrefix(_ url: URL) -> String {
         url.absoluteString.hasSuffix("/") ? url.absoluteString : url.absoluteString + "/"
+    }
+
+    private static func directoryCaches(
+        rootURL: URL,
+        entries: [SearchIndexEntry]
+    ) -> [URL: [SVNListEntry]] {
+        var result: [URL: [SVNListEntry]] = [rootURL: []]
+        let rootValue = rootURL.absoluteString
+        let rootPrefix = directoryPrefix(rootURL)
+        for entry in entries where entry.url.absoluteString.hasPrefix(rootPrefix) {
+            var parentURL = entry.url.deletingLastPathComponent()
+            if parentURL.absoluteString == rootValue || directoryPrefix(parentURL) == rootPrefix {
+                parentURL = rootURL
+            }
+            result[parentURL, default: []].append(SVNListEntry(
+                name: entry.name,
+                kind: entry.kind.svnKind,
+                size: entry.size,
+                revision: entry.revision,
+                author: entry.author,
+                updatedAt: entry.modifiedAt
+            ))
+            if entry.kind == .directory, result[entry.url] == nil { result[entry.url] = [] }
+        }
+        return result
+    }
+
+    private static func deleteDirectoryCache(
+        database: Database,
+        profileID: UUID,
+        directoryURL: String
+    ) throws {
+        _ = try DirectoryCacheEntryRecord
+            .filter(Column("profileID") == profileID.uuidString && Column("directoryURL") == directoryURL)
+            .deleteAll(database)
+        _ = try DirectoryCacheStateRecord.deleteOne(database,
+            key: ["profileID": profileID.uuidString, "directoryURL": directoryURL])
+    }
+
+    private static func writeDirectoryCache(
+        database: Database,
+        profileID: UUID,
+        directoryURL: URL,
+        entries: [SVNListEntry],
+        cachedAt: Date
+    ) throws {
+        try deleteDirectoryCache(database: database, profileID: profileID,
+            directoryURL: directoryURL.absoluteString)
+        for (position, entry) in entries.enumerated() {
+            var record = DirectoryCacheEntryRecord(
+                profileID: profileID.uuidString,
+                directoryURL: directoryURL.absoluteString,
+                position: position,
+                entry: entry
+            )
+            try record.insert(database)
+        }
+        try DirectoryCacheStateRecord(
+            profileID: profileID.uuidString,
+            directoryURL: directoryURL.absoluteString,
+            cachedAt: cachedAt
+        ).save(database)
     }
 
     private static func replacingPrefix(

@@ -48,5 +48,8 @@ final class SidebarStateStoreTests: XCTestCase {
         viewController.setRepositoryProfiles([profile], activateRestoredSelection: true)
 
         XCTAssertEqual(activatedProfileID, profileID)
+        viewController.clearSelection(profileID: profileID)
+        let restoredState = SidebarStateStore(userDefaults: defaults)
+        XCTAssertNil(restoredState.selectedItemKey)
     }
 }

@@ -153,6 +153,42 @@ final class RepositoryMetadataStoreTests: XCTestCase {
         XCTAssertNil(clearedSnapshot)
     }
 
+    func testRecursiveSearchIndexHydratesDirectoryCachesAndRemovesStaleDescendants() async throws {
+        let store = try RepositoryMetadataStore(inMemory: ())
+        let profileID = UUID()
+        let rootURL = try XCTUnwrap(URL(string: "https://svn.example.com/repo"))
+        let directoryURL = rootURL.appendingPathComponent("资料", isDirectory: true)
+        let emptyURL = rootURL.appendingPathComponent("空目录", isDirectory: true)
+        let staleURL = rootURL.appendingPathComponent("已删除", isDirectory: true)
+        try await store.replaceDirectoryCache(profileID: profileID, url: staleURL,
+            entries: [SVNListEntry(name: "旧.txt", kind: .file, size: 1, revision: 1, author: nil, updatedAt: nil)],
+            cachedAt: .distantPast)
+        let indexedAt = Date(timeIntervalSince1970: 2_000)
+        let entries = [
+            makeIndexEntry(profileID: profileID, rootURL: rootURL, path: "资料", kind: .directory),
+            makeIndexEntry(profileID: profileID, rootURL: rootURL, path: "资料/说明.txt"),
+            makeIndexEntry(profileID: profileID, rootURL: rootURL, path: "空目录", kind: .directory),
+            makeIndexEntry(profileID: profileID, rootURL: rootURL, path: "首页.txt")
+        ]
+
+        try await store.replaceSearchIndex(profileID: profileID, rootURL: rootURL,
+            entries: entries, indexedAt: indexedAt)
+
+        let loadedRoot = try await store.directoryCache(profileID: profileID, url: rootURL)
+        let root = try XCTUnwrap(loadedRoot)
+        XCTAssertEqual(root.entries.map(\.name), ["资料", "空目录", "首页.txt"])
+        XCTAssertEqual(root.cachedAt, indexedAt)
+        let loadedDirectory = try await store.directoryCache(profileID: profileID, url: directoryURL)
+        let directory = try XCTUnwrap(loadedDirectory)
+        XCTAssertEqual(directory.entries.map(\.name), ["说明.txt"])
+        XCTAssertEqual(directory.entries.first?.kind, .file)
+        let loadedEmpty = try await store.directoryCache(profileID: profileID, url: emptyURL)
+        let empty = try XCTUnwrap(loadedEmpty)
+        XCTAssertTrue(empty.entries.isEmpty, "Empty indexed directories must still receive a cache snapshot")
+        let loadedStale = try await store.directoryCache(profileID: profileID, url: staleURL)
+        XCTAssertNil(loadedStale)
+    }
+
     func testMetadataMigrationsShareTheApplicationDatabaseWithProfileMigrations() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("SVNClientMetadataTests-\(UUID().uuidString).sqlite")
@@ -179,13 +215,22 @@ final class RepositoryMetadataStoreTests: XCTestCase {
         )
     }
 
-    private func makeIndexEntry(profileID: UUID, rootURL: URL, path: String) -> SearchIndexEntry {
-        SearchIndexEntry(
+    private func makeIndexEntry(
+        profileID: UUID,
+        rootURL: URL,
+        path: String,
+        kind: SavedRepositoryItemKind = .file
+    ) -> SearchIndexEntry {
+        let components = path.split(separator: "/").map(String.init)
+        return SearchIndexEntry(
             profileID: profileID,
             rootURL: rootURL,
-            url: path.split(separator: "/").reduce(rootURL) { $0.appendingPathComponent(String($1)) },
+            url: components.enumerated().reduce(rootURL) { partial, pair in
+                partial.appendingPathComponent(pair.element,
+                    isDirectory: pair.offset < components.count - 1 || kind == .directory)
+            },
             name: URL(fileURLWithPath: path).lastPathComponent,
-            kind: .file,
+            kind: kind,
             size: 10,
             revision: 4,
             author: "tester",

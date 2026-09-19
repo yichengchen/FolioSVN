@@ -5,7 +5,6 @@ struct RepositorySession: Sendable {
     let profileID: UUID
     let displayName: String
     let baseURL: URL
-    let searchRootURL: URL
     let options: SVNRequestOptions
 }
 
@@ -127,11 +126,6 @@ struct BrowserTransfer: Identifiable, Equatable, Sendable {
 
 @MainActor
 final class BrowserViewModel {
-    enum SearchScope: Int, Sendable {
-        case currentDirectory
-        case configuredRoot
-    }
-
     enum State: Equatable {
         case disconnected
         case loading
@@ -158,7 +152,6 @@ final class BrowserViewModel {
     private(set) var noticeText: String?
     private(set) var isShowingSearchResults = false
     private(set) var searchQuery = ""
-    private(set) var searchScope: SearchScope = .configuredRoot
     private(set) var searchIndexedAt: Date?
     private(set) var directoryCachedAt: Date?
     private(set) var directoryTreeGeneration = 0
@@ -195,7 +188,6 @@ final class BrowserViewModel {
             profileID: UUID(),
             displayName: name,
             baseURL: url,
-            searchRootURL: url,
             options: options
         ))
     }
@@ -206,7 +198,6 @@ final class BrowserViewModel {
             profileID: profile.id,
             displayName: profile.displayName,
             baseURL: profile.baseURL,
-            searchRootURL: profile.startURL,
             options: connection.requestOptions
         ), initialURL: initialURL ?? profile.startURL)
     }
@@ -747,10 +738,9 @@ final class BrowserViewModel {
         favoriteURLKeys = keys
     }
 
-    func refreshSearchIndex(updateSearchResults: Bool = true) async throws {
+    private func refreshSearchIndex(rootURL: URL) async throws {
         guard let session, let metadataService else { throw SVNClientError.unsupportedOperation }
         let generation = sessionGeneration
-        let rootURL = session.searchRootURL
         let entries = try await performActivity("正在更新文件名索引…", cancellable: true) {
             try await self.svnClient.listRecursively(url: rootURL, options: session.options)
         }
@@ -783,40 +773,45 @@ final class BrowserViewModel {
         )
         try Task.checkCancellation()
         guard generation == sessionGeneration else { throw CancellationError() }
+        if currentURL == rootURL,
+           let rootSnapshot = try? await metadataService.directoryCache(profileID: session.profileID, url: rootURL) {
+            browsingRows = rootSnapshot.entries.map { BrowserRow(entry: $0, parentURL: rootURL) }
+            directoryCachedAt = rootSnapshot.cachedAt
+            onDirectoryCacheRefreshed?(session.profileID, rootURL, rootSnapshot)
+        }
         searchIndexedAt = indexedAt
         noticeText = "索引更新完成 · \(indexedEntries.count) 项"
-        if updateSearchResults, !searchQuery.isEmpty {
-            try await search(query: searchQuery, scope: searchScope, refreshIfMissing: false)
-        }
         onChange?()
     }
 
-    func search(query: String, scope: SearchScope, refreshIfMissing: Bool = true) async throws {
+    func search(query: String, refreshIfMissing: Bool = true) async throws {
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedQuery.isEmpty else {
             clearSearch()
             return
         }
-        guard let session, let metadataService else { throw SVNClientError.unsupportedOperation }
+        guard let session, let metadataService, let directoryURL = currentURL else { throw SVNClientError.unsupportedOperation }
         let requestID = UUID()
         let generation = sessionGeneration
         searchRequestID = requestID
         searchQuery = normalizedQuery
-        searchScope = scope
         var results = try await metadataService.search(
             profileID: session.profileID,
-            rootURL: session.searchRootURL,
-            directoryURL: scope == .currentDirectory ? currentURL : nil,
+            rootURL: directoryURL,
+            directoryURL: nil,
             query: normalizedQuery
         )
         try checkSearchRequest(requestID, generation: generation)
-        if results.indexedAt == nil, refreshIfMissing {
-            try await refreshSearchIndex(updateSearchResults: false)
+        let indexIsExpired = results.indexedAt.map {
+            Date().timeIntervalSince($0) >= DirectoryCacheSnapshot.timeToLive
+        } ?? true
+        if indexIsExpired, refreshIfMissing {
+            try await refreshSearchIndex(rootURL: directoryURL)
             try checkSearchRequest(requestID, generation: generation)
             results = try await metadataService.search(
                 profileID: session.profileID,
-                rootURL: session.searchRootURL,
-                directoryURL: scope == .currentDirectory ? currentURL : nil,
+                rootURL: directoryURL,
+                directoryURL: nil,
                 query: normalizedQuery
             )
         }
