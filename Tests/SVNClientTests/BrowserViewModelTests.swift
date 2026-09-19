@@ -76,9 +76,11 @@ final class BrowserViewModelTests: XCTestCase {
         model.onTreeDirectoryRefreshed = { url, _ in refreshed.append(url) }
         let refresh = Task { try await model.refresh(expandedDirectoryURLs: [b, a, a]) }
         await client.waitForRequest(a)
-        XCTAssertTrue(model.isBusy)
-        await client.resolve(a, result: .failure(.connectionTimedOut))
         await client.waitForRequest(b)
+        XCTAssertTrue(model.isBusy)
+        let requestsBeforeEitherCompletes = await client.totalListCount
+        XCTAssertEqual(requestsBeforeEitherCompletes, 4, "Connect, root refresh, and both expanded directories should all be observed before either child completes")
+        await client.resolve(a, result: .failure(.connectionTimedOut))
         await client.resolve(b, result: .success([]))
         try await refresh.value
         XCTAssertEqual(refreshed, [b])
@@ -103,13 +105,15 @@ final class BrowserViewModelTests: XCTestCase {
         model.onTreeDirectoryRefreshed = { url, _ in refreshed.append(url) }
         let refresh = Task { try await model.refresh(expandedDirectoryURLs: [a, b]) }
         await client.waitForRequest(a)
+        await client.waitForRequest(b)
         try await model.navigate(to: destination)
         await client.resolve(a, result: .success([]))
+        await client.resolve(b, result: .success([]))
         do { try await refresh.value; XCTFail("Expected obsolete refresh cancellation") }
         catch is CancellationError {}
         XCTAssertTrue(refreshed.isEmpty)
         let bCount = await client.listCount(for: b)
-        XCTAssertEqual(bCount, 0)
+        XCTAssertEqual(bCount, 1)
         XCTAssertEqual(model.currentURL, destination)
         XCTAssertEqual(model.state, .loaded(destination))
         XCTAssertFalse(model.isBusy)
@@ -1136,11 +1140,14 @@ final class BrowserViewModelTests: XCTestCase {
         let task = Task { @MainActor in
             try await viewModel.download(row, to: destination, overwrite: false)
         }
-        while viewModel.activeTransferCount == 0 { await Task.yield() }
+        while viewModel.transfers.first?.stage != .downloading { await Task.yield() }
 
         XCTAssertEqual(viewModel.transfers.first?.stage, .downloading)
+        XCTAssertFalse(viewModel.isBusy, "A background download must not block directory browsing")
+        let transfer = try XCTUnwrap(viewModel.transfers.first)
+        XCTAssertTrue(transfer.canCancel)
 
-        task.cancel()
+        viewModel.cancelTransfer(id: transfer.id)
         do {
             try await task.value
             XCTFail("Expected cancellation")
@@ -1150,6 +1157,21 @@ final class BrowserViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.transfers.first?.state, .cancelled)
         XCTAssertEqual(viewModel.activeTransferCount, 0)
+    }
+
+    func testBatchUploadPlanSkipsOnlyConflicts() {
+        let first = URL(fileURLWithPath: "/tmp/already.txt")
+        let second = URL(fileURLWithPath: "/tmp/new.txt")
+        let duplicateA = URL(fileURLWithPath: "/tmp/a/duplicate.txt")
+        let duplicateB = URL(fileURLWithPath: "/tmp/b/duplicate.txt")
+
+        let plan = makeBrowserUploadPlan(
+            files: [first, second, duplicateA, duplicateB],
+            existingNames: ["already.txt"]
+        )
+
+        XCTAssertEqual(plan.uploadableFiles, [second])
+        XCTAssertEqual(plan.conflictNames, ["already.txt", "duplicate.txt"])
     }
 
     func testFailedDownloadCanBeRetriedWithOriginalRequestAndDestination() async throws {

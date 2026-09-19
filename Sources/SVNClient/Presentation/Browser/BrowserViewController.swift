@@ -3,6 +3,23 @@ import QuickLookUI
 import SnapKit
 import UniformTypeIdentifiers
 
+struct BrowserUploadPlan: Equatable, Sendable {
+    let uploadableFiles: [URL]
+    let conflictNames: [String]
+}
+
+func makeBrowserUploadPlan(files: [URL], existingNames: Set<String>) -> BrowserUploadPlan {
+    let localNameGroups = Dictionary(grouping: files, by: \.lastPathComponent)
+    let duplicateLocalNames = Set(localNameGroups.compactMap { name, values in
+        values.count > 1 ? name : nil
+    })
+    let conflictNames = duplicateLocalNames.union(existingNames.intersection(localNameGroups.keys))
+    return BrowserUploadPlan(
+        uploadableFiles: files.filter { !conflictNames.contains($0.lastPathComponent) },
+        conflictNames: conflictNames.sorted()
+    )
+}
+
 @MainActor
 final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMenuDelegate, @preconcurrency QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     var onNavigationStateChange: (() -> Void)?
@@ -93,7 +110,10 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     var canGoBack: Bool { viewModel.canGoBack }
     var canGoForward: Bool { viewModel.canGoForward }
     var canModifyRepository: Bool {
-        viewModel.currentURL != nil && !viewModel.isBusy && !viewModel.isShowingSearchResults
+        viewModel.currentURL != nil
+            && !viewModel.isBusy
+            && !viewModel.isShowingSearchResults
+            && !viewModel.hasActiveWriteTransfer
     }
     var hasRepositoryConnection: Bool { viewModel.currentURL != nil }
     var currentSearchQuery: String { viewModel.searchQuery }
@@ -175,6 +195,10 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         outlineView.target = self
         outlineView.onSpaceKey = { [weak self] in self?.toggleQuickLook() }
         outlineView.onReturnKey = { [weak self] in self?.renameSelectedItem() }
+        outlineView.onCommandDown = { [weak self] in self?.openSelectedItem() }
+        outlineView.onCommandOpen = { [weak self] in self?.openSelectedItem() }
+        outlineView.onCommandUp = { [weak self] in self?.navigateToParentDirectory() }
+        outlineView.onCommandDelete = { [weak self] in self?.deleteSelectedItem() }
         scrollView.documentView = outlineView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
@@ -366,9 +390,20 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         let modifiedDocumentCount = viewModel.modifiedOpenDocuments.count
         openDocumentsButton.title = "待上传（\(modifiedDocumentCount)）"
         openDocumentsButton.isHidden = modifiedDocumentCount == 0
-        transferButton.title = viewModel.activeTransferCount > 0
-            ? "传输（\(viewModel.activeTransferCount)）"
-            : "传输"
+        let retryableFailureCount = viewModel.transfers.filter(\.canRetry).count
+        if viewModel.activeTransferCount > 0 {
+            transferButton.title = "传输（\(viewModel.activeTransferCount)）"
+            transferButton.contentTintColor = nil
+            transferButton.toolTip = "查看正在进行的传输任务"
+        } else if retryableFailureCount > 0 {
+            transferButton.title = "重试（\(retryableFailureCount)）"
+            transferButton.contentTintColor = .systemRed
+            transferButton.toolTip = "有 \(retryableFailureCount) 个失败的下载可以重试"
+        } else {
+            transferButton.title = "传输"
+            transferButton.contentTintColor = nil
+            transferButton.toolTip = "查看传输任务"
+        }
         viewModel.isBusy ? progressIndicator.startAnimation(nil) : progressIndicator.stopAnimation(nil)
         cancelActivityButton.isHidden = !viewModel.isCancellable
         synchronizeOutlineContent()
@@ -651,6 +686,12 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         }
     }
 
+    private func navigateToParentDirectory() {
+        guard !viewModel.isBusy, viewModel.breadcrumbs.count > 1 else { return }
+        let parentURL = viewModel.breadcrumbs[viewModel.breadcrumbs.count - 2].url
+        run { try await self.viewModel.navigate(to: parentURL) }
+    }
+
     func reviewModifiedOpenDocumentsIfNeeded(force: Bool = false) {
         viewModel.refreshOpenDocumentChanges()
         guard !isReviewingOpenDocumentChanges, !viewModel.isBusy else { return }
@@ -927,34 +968,49 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             targetRows = viewModel.rows
         }
         let existing = Dictionary(uniqueKeysWithValues: targetRows.map { ($0.name, $0) })
-        let conflicts = files.compactMap { localURL in
+        let remoteConflicts = files.compactMap { localURL in
             existing[localURL.lastPathComponent].map { row in (localURL, row) }
         }
-        if files.count == 1, let (localURL, row) = conflicts.first, row.kind == .file {
+        if files.count == 1, let (localURL, row) = remoteConflicts.first, row.kind == .file {
             confirmReplace(row: row, localURL: localURL)
             return
         }
-        if let conflict = conflicts.first {
-            presentError(message: "“\(conflict.0.lastPathComponent)”已存在。请单独选择该文件执行替换，其他文件尚未上传。")
-            return
+
+        let plan = makeBrowserUploadPlan(files: files, existingNames: Set(existing.keys))
+        if !plan.conflictNames.isEmpty {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "有 \(files.count - plan.uploadableFiles.count) 个文件存在名称冲突"
+            let names = plan.conflictNames.prefix(4).joined(separator: "、")
+            let suffix = plan.conflictNames.count > 4 ? "等" : ""
+            if plan.uploadableFiles.isEmpty {
+                alert.informativeText = "冲突文件：\(names)\(suffix)。没有可以直接上传的文件；已有文件请单独执行替换。"
+                alert.addButton(withTitle: "好")
+                alert.runModal()
+                return
+            }
+            alert.informativeText = "将跳过：\(names)\(suffix)，继续上传其余 \(plan.uploadableFiles.count) 个文件。已有文件可稍后单独执行替换。"
+            alert.addButton(withTitle: "上传其余文件")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
 
-        let totalBytes = files.reduce(Int64(0)) { partial, url in
+        let totalBytes = plan.uploadableFiles.reduce(Int64(0)) { partial, url in
             let values = try? url.resourceValues(forKeys: [.fileSizeKey])
             return partial + Int64(values?.fileSize ?? 0)
         }
         let destinationName = targetDirectory?.row.name ?? "当前文件夹"
-        let details = "将上传 \(files.count) 个文件（\(ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file))）到“\(destinationName)”，并作为一次提交。"
+        let details = "将上传 \(plan.uploadableFiles.count) 个文件（\(ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file))）到“\(destinationName)”，并作为一次提交。"
         guard let message = prompt(
             title: "确认上传",
             message: details,
             fieldLabel: "提交说明",
-            initialValue: "上传 \(files.count) 个文件",
+            initialValue: "上传 \(plan.uploadableFiles.count) 个文件",
             confirmTitle: "上传"
         ) else { return }
         run {
             _ = try await self.viewModel.upload(
-                files: files,
+                files: plan.uploadableFiles,
                 to: targetDirectory?.row.url,
                 message: message
             )
@@ -1407,6 +1463,17 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
 
     @objc private func showTransferTasks() {
         let menu = NSMenu(title: "传输任务")
+        if let retryableTransfer = viewModel.transfers.first(where: \.canRetry) {
+            let retry = menu.addItem(
+                withTitle: "重试“\(retryableTransfer.title)”",
+                action: #selector(retryTransfer(_:)),
+                keyEquivalent: ""
+            )
+            retry.target = self
+            retry.representedObject = retryableTransfer.id as NSUUID
+            retry.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "重试")
+            menu.addItem(.separator())
+        }
         if viewModel.transfers.isEmpty {
             let item = NSMenuItem(title: "暂无传输记录", action: nil, keyEquivalent: "")
             item.isEnabled = false
@@ -1430,15 +1497,6 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
                 menu.addItem(item)
             }
         }
-        if viewModel.isCancellable {
-            menu.addItem(.separator())
-            let cancel = menu.addItem(
-                withTitle: "取消当前传输",
-                action: #selector(cancelCurrentActivity),
-                keyEquivalent: ""
-            )
-            cancel.target = self
-        }
         if viewModel.transfers.contains(where: { $0.state != .running }) {
             menu.addItem(.separator())
             let clear = menu.addItem(
@@ -1454,6 +1512,15 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private func transferActionsMenu(for transfer: BrowserTransfer) -> NSMenu {
         let menu = NSMenu(title: transfer.title)
         let identifier = transfer.id as NSUUID
+        if transfer.canCancel {
+            let cancel = menu.addItem(
+                withTitle: "取消传输",
+                action: #selector(cancelTransfer(_:)),
+                keyEquivalent: ""
+            )
+            cancel.target = self
+            cancel.representedObject = identifier
+        }
         if case .completed = transfer.state,
            let outputURL = transfer.outputURL,
            FileManager.default.fileExists(atPath: outputURL.path) {
@@ -1515,6 +1582,11 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     @objc private func retryTransfer(_ sender: NSMenuItem) {
         guard let transfer = transfer(from: sender) else { return }
         run { try await self.viewModel.retryTransfer(id: transfer.id) }
+    }
+
+    @objc private func cancelTransfer(_ sender: NSMenuItem) {
+        guard let transfer = transfer(from: sender) else { return }
+        viewModel.cancelTransfer(id: transfer.id)
     }
 
     @objc private func showTransferError(_ sender: NSMenuItem) {
@@ -1588,12 +1660,13 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             }
         }
         if menuItem.action == #selector(deleteSelectedItem) {
-            return true
+            return canModifyRepository
         }
         guard rows.count == 1, let row = rows.first else { return false }
         if menuItem.action == #selector(replaceSelectedItem) {
-            return row.kind == .file
+            return row.kind == .file && canModifyRepository
         }
+        if menuItem.action == #selector(renameSelectedItem) { return canModifyRepository }
         if menuItem.action == #selector(showSelectedItemHistory) {
             return row.kind == .file
         }
@@ -1826,9 +1899,14 @@ private enum BatchDownloadConflictResolution {
 private final class BrowserOutlineView: NSOutlineView {
     var onSpaceKey: (() -> Void)?
     var onReturnKey: (() -> Void)?
+    var onCommandDown: (() -> Void)?
+    var onCommandOpen: (() -> Void)?
+    var onCommandUp: (() -> Void)?
+    var onCommandDelete: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        var modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        modifiers.remove([.numericPad, .function])
         if event.keyCode == 49, modifiers.isEmpty {
             onSpaceKey?()
             return
@@ -1836,6 +1914,27 @@ private final class BrowserOutlineView: NSOutlineView {
         if (event.keyCode == 36 || event.keyCode == 76), modifiers.isEmpty {
             onReturnKey?()
             return
+        }
+        if modifiers == .command {
+            switch event.keyCode {
+            case 125:
+                onCommandDown?()
+                return
+            case 126:
+                onCommandUp?()
+                return
+            case 51, 117:
+                onCommandDelete?()
+                return
+            case 0:
+                selectAll(nil)
+                return
+            case 31:
+                onCommandOpen?()
+                return
+            default:
+                break
+            }
         }
         super.keyDown(with: event)
     }

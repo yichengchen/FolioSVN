@@ -46,6 +46,8 @@ final class RepositoryConnectionViewController: NSViewController {
     private let saveButton = NSButton(title: "保存并连接", target: nil, action: nil)
     private let existingProfile: RepositoryProfile?
     private let existingPassword: String?
+    private var operationTask: Task<Void, Never>?
+    private var operationID: UUID?
 
     init(profile: RepositoryProfile? = nil, password: String? = nil) {
         existingProfile = profile
@@ -100,6 +102,7 @@ final class RepositoryConnectionViewController: NSViewController {
 
         cancelButton.target = self
         cancelButton.action = #selector(cancel)
+        cancelButton.keyEquivalent = "\u{1b}"
         testButton.target = self
         testButton.action = #selector(testConnection)
         saveButton.target = self
@@ -188,6 +191,12 @@ final class RepositoryConnectionViewController: NSViewController {
     }
 
     @objc private func cancel() {
+        if let operationTask {
+            operationTask.cancel()
+            cancelButton.isEnabled = false
+            showStatus("正在取消连接…", color: .secondaryLabelColor)
+            return
+        }
         onCancel?()
     }
 
@@ -206,16 +215,32 @@ final class RepositoryConnectionViewController: NSViewController {
         draft: RepositoryProfileDraft,
         successMessage: String?
     ) {
+        operationTask?.cancel()
+        let id = UUID()
+        operationID = id
         setLoading(true)
-        Task { @MainActor [weak self] in
+        operationTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer {
+                if operationID == id {
+                    operationTask = nil
+                    operationID = nil
+                }
+            }
             do {
                 try await action(draft)
+                try Task.checkCancellation()
+                guard operationID == id else { return }
                 if let successMessage {
                     showStatus(successMessage, color: .systemGreen)
                     setLoading(false)
                 }
+            } catch is CancellationError {
+                guard operationID == id else { return }
+                showStatus("连接已取消", color: .secondaryLabelColor)
+                setLoading(false)
             } catch {
+                guard operationID == id else { return }
                 showStatus(error.localizedDescription, color: .systemRed)
                 setLoading(false)
             }
@@ -287,7 +312,8 @@ final class RepositoryConnectionViewController: NSViewController {
         for control in [nameField, urlField, usernameField, passwordField, startPathField, certificatePopup] {
             control.isEnabled = !isLoading
         }
-        cancelButton.isEnabled = !isLoading
+        cancelButton.isEnabled = true
+        cancelButton.title = isLoading ? "取消连接" : "取消"
         testButton.isEnabled = !isLoading
         saveButton.isEnabled = !isLoading
         isLoading ? progressIndicator.startAnimation(nil) : progressIndicator.stopAnimation(nil)

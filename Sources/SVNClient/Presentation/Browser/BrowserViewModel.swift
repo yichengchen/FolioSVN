@@ -108,6 +108,7 @@ struct BrowserTransfer: Identifiable, Equatable, Sendable {
     var stage: Stage
     let outputURL: URL?
     let retryRequest: RetryRequest?
+    let isCancellable: Bool
     let startedAt: Date
     var finishedAt: Date?
 
@@ -132,10 +133,21 @@ struct BrowserTransfer: Identifiable, Equatable, Sendable {
         if case .failed = state { return true }
         return false
     }
+
+    var canCancel: Bool {
+        guard isCancellable else { return false }
+        if case .running = state { return true }
+        return false
+    }
 }
 
 @MainActor
 final class BrowserViewModel {
+    private enum ExpandedDirectoryRefreshResult: Sendable {
+        case refreshed(URL, [SVNListEntry])
+        case failed(String)
+    }
+
     private struct SearchIndexRefreshKey: Hashable {
         let profileID: UUID
         let rootURL: URL
@@ -219,9 +231,17 @@ final class BrowserViewModel {
     private var openDocuments: [UUID: TrackedOpenDocument] = [:]
     private var backgroundDirectoryTasks: [URL: (id: UUID, task: Task<Void, Never>)] = [:]
     private var searchIndexRefreshTasks: [SearchIndexRefreshKey: SharedSearchIndexRefresh] = [:]
+    private var transferCancellations: [UUID: () -> Void] = [:]
 
     var activeTransferCount: Int {
         transfers.filter { $0.state == .running }.count
+    }
+
+    var hasActiveWriteTransfer: Bool {
+        transfers.contains { transfer in
+            guard transfer.state == .running else { return false }
+            return transfer.kind == .upload || transfer.kind == .replace
+        }
     }
 
     var modifiedOpenDocuments: [BrowserOpenDocumentChange] {
@@ -424,34 +444,86 @@ final class BrowserViewModel {
 
     func refresh(
         expandedDirectoryURLs: [URL] = [],
-        shouldRefreshDirectory: (URL) -> Bool = { _ in true }
+        shouldRefreshDirectory: @escaping @MainActor (URL) -> Bool = { _ in true }
     ) async throws {
         guard let session, let currentURL else { return }
         endSearchMode(restoreRows: false)
         try await load(url: currentURL, clearRows: false, policy: .reload)
         let requestID = directoryRequestID
         let generation = sessionGeneration
+        let treeGeneration = directoryTreeGeneration
+        let svnClient = self.svnClient
+        let options = session.options
         onRepositoryChanged?(session.profileID, currentURL)
         var failures: [String] = []
         let directories = Array(Set(expandedDirectoryURLs)).sorted {
             if $0.pathComponents.count != $1.pathComponents.count { return $0.pathComponents.count < $1.pathComponents.count }
             return $0.absoluteString < $1.absoluteString
-        }
+        }.filter(shouldRefreshDirectory)
         if !directories.isEmpty {
             try await performActivity("正在刷新已展开的文件夹…", cancellable: true) {
-                for url in directories {
-                    try self.checkDirectoryRequest(requestID, generation: generation)
-                    guard shouldRefreshDirectory(url) else { continue }
-                    do {
-                        let rows = try await self.rows(in: url, forceReload: true)
-                        try self.checkDirectoryRequest(requestID, generation: generation)
-                        // A folder collapsed while this read was pending needs no UI update.
-                        if shouldRefreshDirectory(url) { self.onTreeDirectoryRefreshed?(url, rows) }
-                    } catch is CancellationError {
-                        throw CancellationError()
-                    } catch {
-                        try self.checkDirectoryRequest(requestID, generation: generation)
-                        failures.append(url.lastPathComponent)
+                try await withThrowingTaskGroup(of: ExpandedDirectoryRefreshResult.self) { group in
+                    var nextIndex = 0
+                    let concurrentLimit = min(4, directories.count)
+                    for _ in 0..<concurrentLimit {
+                        let url = directories[nextIndex]
+                        nextIndex += 1
+                        group.addTask {
+                            do {
+                                return .refreshed(url, try await svnClient.list(url: url, options: options))
+                            } catch is CancellationError {
+                                throw CancellationError()
+                            } catch {
+                                return .failed(url.lastPathComponent)
+                            }
+                        }
+                    }
+                    while let result = try await group.next() {
+                        switch result {
+                        case let .refreshed(url, entries):
+                            try self.checkDirectoryRequest(requestID, generation: generation)
+                            let cachedAt = Date()
+                            if treeGeneration == self.directoryTreeGeneration {
+                                try? await self.metadataService?.replaceDirectoryCache(
+                                    profileID: session.profileID,
+                                    url: url,
+                                    entries: entries,
+                                    cachedAt: cachedAt
+                                )
+                                try self.checkDirectoryRequest(requestID, generation: generation)
+                                self.onDirectoryCacheRefreshed?(
+                                    session.profileID,
+                                    url,
+                                    DirectoryCacheSnapshot(entries: entries, cachedAt: cachedAt)
+                                )
+                            }
+                            // A folder collapsed while this read was pending needs no UI update.
+                            if shouldRefreshDirectory(url) {
+                                self.onTreeDirectoryRefreshed?(
+                                    url,
+                                    entries.map { BrowserRow(entry: $0, parentURL: url) }
+                                )
+                            }
+                        case let .failed(name):
+                            failures.append(name)
+                        }
+                        while nextIndex < directories.count,
+                              !shouldRefreshDirectory(directories[nextIndex]) {
+                            nextIndex += 1
+                        }
+                        if nextIndex < directories.count {
+                            let url = directories[nextIndex]
+                            nextIndex += 1
+                            group.addTask {
+                                do {
+                                    return .refreshed(url, try await svnClient.list(url: url, options: options))
+                                } catch is CancellationError {
+                                    throw CancellationError()
+                                } catch {
+                                    return .failed(url.lastPathComponent)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1460,7 +1532,7 @@ final class BrowserViewModel {
         cancellable: Bool,
         outputURL: URL?,
         retryRequest: BrowserTransfer.RetryRequest?,
-        operation: @MainActor (_ updateStage: @MainActor (BrowserTransfer.Stage) -> Void) async throws -> Result
+        operation: @escaping @MainActor (_ updateStage: @MainActor (BrowserTransfer.Stage) -> Void) async throws -> Result
     ) async throws -> Result {
         let id = UUID()
         transfers.insert(
@@ -1473,6 +1545,7 @@ final class BrowserViewModel {
                 stage: .preparing,
                 outputURL: outputURL,
                 retryRequest: retryRequest,
+                isCancellable: cancellable,
                 startedAt: .now,
                 finishedAt: nil
             ),
@@ -1480,15 +1553,18 @@ final class BrowserViewModel {
         )
         trimTransferHistory()
         onChange?()
+        let task = Task { @MainActor in
+            try await operation { [weak self] stage in
+                self?.updateTransferStage(id: id, stage: stage)
+            }
+        }
+        transferCancellations[id] = { task.cancel() }
+        defer { transferCancellations.removeValue(forKey: id) }
         do {
-            let result = try await performActivity(
-                "正在\(title)…",
-                cancellable: cancellable,
-                transferID: id
-            ) {
-                try await operation { [weak self] stage in
-                    self?.updateTransferStage(id: id, stage: stage)
-                }
+            let result = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
             }
             finishTransfer(id: id, state: .completed)
             return result
@@ -1499,6 +1575,11 @@ final class BrowserViewModel {
             finishTransfer(id: id, state: .failed(error.localizedDescription))
             throw error
         }
+    }
+
+    func cancelTransfer(id: UUID) {
+        guard transfers.first(where: { $0.id == id })?.canCancel == true else { return }
+        transferCancellations[id]?()
     }
 
     func clearFinishedTransfers() {

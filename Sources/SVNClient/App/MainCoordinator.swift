@@ -185,6 +185,7 @@ final class MainCoordinator {
         connectionViewController.onTest = { [weak self] draft in
             guard let self else { return }
             _ = try await self.svnClient.list(url: draft.startURL, options: draft.requestOptions)
+            try Task.checkCancellation()
         }
         connectionViewController.onSave = { [weak self, weak parentWindow, weak sheetWindow, weak browserViewModel] draft in
             guard let self, let browserViewModel else { return }
@@ -202,11 +203,15 @@ final class MainCoordinator {
                 updatedAt: now
             )
             _ = try await self.svnClient.list(url: profile.startURL, options: draft.requestOptions)
+            try Task.checkCancellation()
             // The profile ID survives edits, but its credentials and visible tree may not.
             // Reconnecting must never reuse directory or search data read by the old account.
             try await self.metadataService.clearRepositoryCache(profileID: profile.id)
+            try Task.checkCancellation()
             try await self.profileService.save(profile: profile, password: draft.password)
+            try Task.checkCancellation()
             try await browserViewModel.connect(profile: profile, password: draft.password)
+            try Task.checkCancellation()
             await self.reloadRepositoryProfiles()
             guard let parentWindow, let sheetWindow else { return }
             parentWindow.endSheet(sheetWindow)
