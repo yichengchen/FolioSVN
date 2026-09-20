@@ -60,6 +60,6 @@ xcodebuild \
   test
 ```
 
-GitHub Actions 使用 `macos-26` arm64 runner，安装 .NET SDK 并生成 Word diff runtime，验证已提交的 SVN Runtime，检查 `project.yml` 与 Xcode 工程是否同步，并完成无签名 Debug 测试和 Release 构建。推送 `v*` tag 可通过独立的 Release 工作流完成 Developer ID 签名、Apple 公证和 GitHub Release 发布；首次使用需按 [发布配置](docs/release.md) 设置 Secrets。
+GitHub Actions 使用 `macos-26` arm64 runner，安装 .NET SDK 并生成 Word diff runtime，验证已提交的 SVN Runtime，检查 `project.yml` 与 Xcode 工程是否同步，并完成无签名 Debug 测试和 Release 构建。CI 与 Release 按锁文件缓存 NuGet 和 SwiftPM 依赖，但不缓存 DerivedData 或签名产物。推送 `v*` tag 可通过独立的 Release 工作流完成 Developer ID 签名、Apple 公证和 GitHub Release 发布；首次使用需按 [发布配置](docs/release.md) 设置 Secrets。
 
 产品与技术文档见 [docs/README.md](./docs/README.md)。

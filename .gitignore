@@ -1,6 +1,8 @@
 .DS_Store
 DerivedData/
 build/
+.nuget/
+.swiftpm-cache/
 **/bin/
 **/obj/
 Vendor/WordDiffRuntime/*

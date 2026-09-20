@@ -12,6 +12,7 @@ staged_runtime="$work_directory/runtime"
   --configuration Release --runtime osx-arm64 --self-contained true \
   -p:PublishSingleFile=true -p:PublishTrimmed=false \
   -p:EnableCompressionInSingleFile=true \
+  -p:RestoreLockedMode=true \
   --output "$staged_runtime"
 
 license_directory="$staged_runtime/licenses"

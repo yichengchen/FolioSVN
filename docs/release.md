@@ -2,7 +2,9 @@
 
 `.github/workflows/release.yaml` 在推送 `v1.0.0` 或 `v1.0.0-beta.1` 形式的 tag 时运行。只发布 arm64、macOS 26+ 版本。预发布 tag 会创建 GitHub prerelease。
 
-流程：构建 Word diff runtime → 导入临时签名钥匙串 → Developer ID Archive → 应用公证/staple/验证 → 创建并签名 DMG → DMG 公证/staple/验证 → GitHub Release。Debug 测试和无签名 Release 构建由 tag 所在提交此前的分支/PR CI 负责，Release 工作流不重复执行测试；单独推送 tag 不会再次触发 CI。应用和 DMG 都带公证票据。使用 Xcode 默认 DerivedData；Archive 和临时文件在 runner 临时目录中。任一公证非 Accepted 时都不会发布。中间 ZIP 仅用于应用公证，不作为 Release 资产上传。
+流程：构建 Word diff runtime → 导入临时签名钥匙串 → Developer ID Archive → 应用公证/staple/验证 → 使用 Homebrew 安装的 `create-dmg` 创建并签名 DMG → DMG 公证/staple/验证 → GitHub Release。Debug 测试和无签名 Release 构建由 tag 所在提交此前的分支/PR CI 负责，Release 工作流不重复执行测试；单独推送 tag 不会再次触发 CI。应用和 DMG 都带公证票据。使用 Xcode 默认 DerivedData；Archive 和临时文件在 runner 临时目录中。任一公证非 Accepted 时都不会发布。中间 ZIP 仅用于应用公证，不作为 Release 资产上传。
+
+CI 和 Release 共用基于锁文件的 NuGet 与 SwiftPM 依赖缓存。.NET SDK 版本固定在根目录 `global.json`；NuGet publish 强制锁定模式，依赖或 SDK 变化时必须同步提交 `Tools/WordDiffDemo/packages.lock.json`。SwiftPM cache key 包含固定的 Xcode 版本和 `Package.resolved` 哈希。不缓存 DerivedData、生成的 runtime、签名应用、Archive 或 DMG。
 
 ## 一次性配置
 
@@ -38,7 +40,7 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-应用版本使用 tag 的数字部分，构建号使用 GitHub run number。最终资产：`FolioSVN-v1.0.0.dmg` 和 `SHA256SUMS`，文件名不带架构后缀（应用仍为 arm64）。DMG 内含已签名、公证且 staple 的 `Folio SVN.app` 及 `/Applications` 快捷方式，用户可拖拽安装。DMG 本身也签名、公证并 staple，校验和在最终 staple 后生成。
+应用版本使用 tag 的数字部分，构建号使用 GitHub run number。最终资产：`FolioSVN-v1.0.0.dmg` 和 `SHA256SUMS`，文件名不带架构后缀（应用仍为 arm64）。DMG 由 Homebrew 提供的 `create-dmg` 生成，提供固定窗口尺寸、大图标、应用与 Applications 左右拖拽布局，并在可用时使用 AppIcon 作为卷图标。DMG 内含已签名、公证且 staple 的 `Folio SVN.app`。DMG 本身也签名、公证并 staple，校验和在最终 staple 后生成。
 
 已有 Release 不会被工作流覆盖。公证或构建失败可重跑同一 run；若该版本已经成功发布，修复代码后使用新版本 tag，不移动已有发布 tag。公证失败日志显示在 Actions 的公证步骤中；超时或认证失败不会发布未公证产物。
 

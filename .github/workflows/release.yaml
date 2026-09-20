@@ -26,7 +26,9 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       DEVELOPMENT_TEAM: MEWHFZ92DY
+      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
       NSUnbufferedIO: 'YES'
+      SWIFTPM_CACHE_PATH: ${{ github.workspace }}/.swiftpm-cache
 
     steps:
       - name: Check out tag
@@ -71,10 +73,23 @@ jobs:
           unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
 
+      - name: Install create-dmg
+        run: |
+          brew install create-dmg
+          create-dmg --version
+
       - name: Install .NET SDK for Word diff runtime
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '10.0.401'
+          cache: true
+          cache-dependency-path: Tools/WordDiffDemo/packages.lock.json
+
+      - name: Restore Swift package cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ env.SWIFTPM_CACHE_PATH }}
+          key: macos-arm64-xcode-26.6-swiftpm-${{ hashFiles('SVNClient.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
 
       - name: Build Word diff runtime and verify generated project
         run: |
@@ -114,6 +129,7 @@ jobs:
         run: |
           xcodebuild -project SVNClient.xcodeproj -scheme SVNClient \
             -configuration Release -destination 'platform=macOS,arch=arm64' \
+            -clonedSourcePackagesDirPath "$SWIFTPM_CACHE_PATH" \
             -archivePath "$RUNNER_TEMP/FolioSVN.xcarchive" \
             CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
             DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" ENABLE_HARDENED_RUNTIME=YES \
@@ -162,11 +178,29 @@ jobs:
           staging="$RUNNER_TEMP/dmg-staging"
           mkdir -p "$staging"
           ditto "$RELEASE_APP_PATH" "$staging/$(basename "$RELEASE_APP_PATH")"
-          ln -s /Applications "$staging/Applications"
           dmg="$RUNNER_TEMP/release-assets/FolioSVN-${GITHUB_REF_NAME}.dmg"
-          hdiutil create -volname 'Folio SVN' -srcfolder "$staging" \
-            -format UDZO -fs HFS+ "$dmg"
-          codesign --sign "$SIGNING_IDENTITY" --timestamp "$dmg"
+          volume_icon=()
+          app_icon="$RELEASE_APP_PATH/Contents/Resources/AppIcon.icns"
+          if [[ -f "$app_icon" ]]; then
+            volume_icon=(--volicon "$app_icon")
+          fi
+          create-dmg \
+            --volname 'Folio SVN' \
+            "${volume_icon[@]}" \
+            --window-pos 200 120 \
+            --window-size 660 400 \
+            --text-size 14 \
+            --icon-size 128 \
+            --icon "$(basename "$RELEASE_APP_PATH")" 180 190 \
+            --hide-extension "$(basename "$RELEASE_APP_PATH")" \
+            --app-drop-link 480 190 \
+            --format UDZO \
+            --filesystem HFS+ \
+            --no-internet-enable \
+            --hdiutil-quiet \
+            --hdiutil-retries 5 \
+            "$dmg" "$staging"
+          codesign --force --sign "$SIGNING_IDENTITY" --timestamp "$dmg"
           codesign --verify --strict --verbose=2 "$dmg"
 
       - name: Notarize DMG and require Accepted status
