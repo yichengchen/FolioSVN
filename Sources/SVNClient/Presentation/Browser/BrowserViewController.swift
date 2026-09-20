@@ -1256,7 +1256,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             guard let self, !self.viewModel.isBusy else { return }
             let panel = NSOpenPanel()
             panel.title = "选择与 r\(entry.revision) 比较的 Word 文件"
-            panel.allowedContentTypes = [UTType(filenameExtension: "docx")!]
+            panel.allowedContentTypes = [UTType(filenameExtension: "doc")!, UTType(filenameExtension: "docx")!]
             panel.canChooseDirectories = false
             panel.allowsMultipleSelection = false
             guard panel.runModal() == .OK, let fileURL = panel.url else { return }

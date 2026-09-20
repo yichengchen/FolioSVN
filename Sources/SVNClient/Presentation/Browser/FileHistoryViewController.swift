@@ -64,7 +64,7 @@ final class FileHistoryViewController: NSViewController, NSTableViewDataSource, 
         restoreButton.hasDestructiveAction = true
         compareButton.target = self
         compareButton.action = #selector(compareSelected)
-        compareButton.isHidden = history.sourceURL.pathExtension.lowercased() != "docx"
+        compareButton.isHidden = !["doc", "docx"].contains(history.sourceURL.pathExtension.lowercased())
         externalCompareButton.isHidden = compareButton.isHidden
         externalCompareButton.target = self
         externalCompareButton.action = #selector(compareExternalSelected)
@@ -97,7 +97,7 @@ final class FileHistoryViewController: NSViewController, NSTableViewDataSource, 
     private func configureLayout() {
         let title = NSTextField(labelWithString: "“\(history.displayName)”的历史版本")
         title.font = .systemFont(ofSize: 18, weight: .semibold)
-        let subtitle = NSTextField(labelWithString: "当前版本 r\(history.currentRevision) · \(history.entries.count) 条记录 · DOCX 可按 ⌘ 选择两个版本比较")
+        let subtitle = NSTextField(labelWithString: "当前版本 r\(history.currentRevision) · \(history.entries.count) 条记录 · Word 文件可按 ⌘ 选择两个版本比较")
         subtitle.textColor = .secondaryLabelColor
 
         let scrollView = NSScrollView()

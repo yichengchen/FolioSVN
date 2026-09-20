@@ -41,12 +41,17 @@ internal static class WordDiffDemoApp
 
         if (positional.Length != 3)
         {
-            return Fail(2, "invalid_arguments", "compare requires ORIGINAL.docx REVISED.docx OUTPUT.docx");
+            return Fail(2, "invalid_arguments", "compare requires ORIGINAL.(doc|docx) REVISED.(doc|docx) OUTPUT.docx");
         }
 
         var originalPath = Path.GetFullPath(positional[0]);
         var revisedPath = Path.GetFullPath(positional[1]);
         var outputPath = Path.GetFullPath(positional[2]);
+
+        if (!IsSupportedWordPath(originalPath) || !IsSupportedWordPath(revisedPath))
+        {
+            return Fail(2, "unsupported_format", "Only .doc and .docx inputs are supported");
+        }
 
         if (!File.Exists(originalPath))
         {
@@ -72,12 +77,16 @@ internal static class WordDiffDemoApp
                 DetailThreshold = 0,
             };
 
-            var original = new WmlDocument(originalPath);
-            var revised = new WmlDocument(revisedPath);
+            var textMode = IsLegacyDoc(originalPath) || IsLegacyDoc(revisedPath);
+            using var normalized = textMode ? NormalizeForTextComparison(originalPath, revisedPath) : null;
+            var comparisonOriginalPath = normalized?.OriginalPath ?? originalPath;
+            var comparisonRevisedPath = normalized?.RevisedPath ?? revisedPath;
+            var original = new WmlDocument(comparisonOriginalPath);
+            var revised = new WmlDocument(comparisonRevisedPath);
             var compared = WmlComparer.Compare(original, revised, settings);
             compared.SaveAs(outputPath);
             var htmlPath = Path.ChangeExtension(outputPath, ".html");
-            WriteHtml(outputPath, htmlPath);
+            WriteHtml(outputPath, htmlPath, textMode);
 
             var revisionCount = WmlComparer.GetRevisions(compared, settings).Count();
             WriteJson(new
@@ -86,6 +95,7 @@ internal static class WordDiffDemoApp
                 outputPath,
                 htmlPath,
                 revisionCount,
+                comparisonMode = textMode ? "text" : "document",
             });
             return 0;
         }
@@ -130,7 +140,65 @@ internal static class WordDiffDemoApp
 
     // A deliberately simple local preview, not a Word layout renderer.
     // Only emitted markup is used; input URLs, scripts and relationships are never followed.
-    private static void WriteHtml(string documentPath, string htmlPath)
+    private static bool IsSupportedWordPath(string path) =>
+        Path.GetExtension(path).Equals(".doc", StringComparison.OrdinalIgnoreCase) ||
+        Path.GetExtension(path).Equals(".docx", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsLegacyDoc(string path) =>
+        Path.GetExtension(path).Equals(".doc", StringComparison.OrdinalIgnoreCase);
+
+    private static NormalizedDocuments NormalizeForTextComparison(string originalPath, string revisedPath)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "folio-worddiff-normalized-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var original = Path.Combine(directory, "original.docx");
+            var revised = Path.Combine(directory, "revised.docx");
+            CreateDocument(original, ExtractParagraphs(originalPath));
+            CreateDocument(revised, ExtractParagraphs(revisedPath));
+            return new NormalizedDocuments(directory, original, revised);
+        }
+        catch
+        {
+            Directory.Delete(directory, true);
+            throw;
+        }
+    }
+
+    private static string[] ExtractParagraphs(string path)
+    {
+        string text;
+        if (IsLegacyDoc(path))
+        {
+            text = LegacyDocTextExtractor.Extract(path);
+        }
+        else
+        {
+            using var document = WordprocessingDocument.Open(path, false);
+            text = string.Join("\n", document.MainDocumentPart?.Document.Body?
+                .Descendants<Paragraph>().Select(paragraph => paragraph.InnerText) ?? Array.Empty<string>());
+        }
+        text = text.Replace('\u0007', '\t').Replace('\v', '\n').Replace('\f', '\n').Replace("\r\n", "\n").Replace('\r', '\n');
+        return text.Split('\n', StringSplitOptions.None);
+    }
+
+    private sealed class NormalizedDocuments : IDisposable
+    {
+        public string OriginalPath { get; }
+        public string RevisedPath { get; }
+        private readonly string directory;
+
+        public NormalizedDocuments(string directory, string originalPath, string revisedPath) =>
+            (this.directory, OriginalPath, RevisedPath) = (directory, originalPath, revisedPath);
+
+        public void Dispose()
+        {
+            try { Directory.Delete(directory, true); } catch { }
+        }
+    }
+
+    private static void WriteHtml(string documentPath, string htmlPath, bool textMode)
     {
         using var document = WordprocessingDocument.Open(documentPath, false);
         using var stream = document.MainDocumentPart!.GetStream();
@@ -165,7 +233,9 @@ internal static class WordDiffDemoApp
             "del{background:#ffe1e1;color:#a12222}table{border-collapse:collapse;width:100%}" +
             "td{border:1px solid #ccc;padding:8px;vertical-align:top}.note{color:#666;font-size:13px}" +
             "</style><body><h2>Word 版本比较</h2>" +
-            "<p class='note'>绿色：新增 · 红色删除线：删除。简化内容预览，不还原原始分页、图片、编号和格式；页眉页脚等不在此预览中。详细修订可导出 DOCX。</p>" +
+            "<p class='note'>绿色：新增 · 红色删除线：删除。" +
+            (textMode ? "由于输入包含旧版 DOC，本次只比较正文文本；" : "") +
+            "简化内容预览不还原原始分页、图片、编号和格式；页眉页脚等不在此预览中。详细修订可导出 DOCX。</p>" +
             Render(body) + "</body></html>";
         File.WriteAllText(htmlPath, html);
     }
@@ -207,7 +277,7 @@ internal static class WordDiffDemoApp
     private static void PrintUsage()
     {
         Console.WriteLine(
-            "worddiff-demo compare ORIGINAL.docx REVISED.docx OUTPUT.docx [--author=NAME]\n" +
+            "worddiff-demo compare ORIGINAL.(doc|docx) REVISED.(doc|docx) OUTPUT.docx [--author=NAME]\n" +
             "worddiff-demo make-samples OUTPUT_DIRECTORY");
     }
 }
