@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text;
 using System.Net;
 using System.Xml.Linq;
 using DocumentFormat.OpenXml;
@@ -179,8 +180,27 @@ internal static class WordDiffDemoApp
             text = string.Join("\n", document.MainDocumentPart?.Document.Body?
                 .Descendants<Paragraph>().Select(paragraph => paragraph.InnerText) ?? Array.Empty<string>());
         }
-        text = text.Replace('\u0007', '\t').Replace('\v', '\n').Replace('\f', '\n').Replace("\r\n", "\n").Replace('\r', '\n');
+        text = NormalizeExtractedText(text);
         return text.Split('\n', StringSplitOptions.None);
+    }
+
+    private static string NormalizeExtractedText(string text)
+    {
+        text = text.Replace('\u0007', '\t').Replace('\v', '\n').Replace('\f', '\n')
+            .Replace("\r\n", "\n").Replace('\r', '\n');
+        var result = new StringBuilder(text.Length);
+        foreach (var rune in text.EnumerateRunes())
+        {
+            var value = rune.Value;
+            if (value is '\t' or '\n' or '\r' ||
+                value is >= 0x20 and <= 0xD7FF ||
+                value is >= 0xE000 and <= 0xFFFD ||
+                value is >= 0x10000 and <= 0x10FFFF)
+            {
+                result.Append(rune.ToString());
+            }
+        }
+        return result.ToString();
     }
 
     private sealed class NormalizedDocuments : IDisposable
