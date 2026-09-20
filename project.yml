@@ -26,6 +26,7 @@ targets:
   SVNClient:
     type: application
     platform: macOS
+    productName: Folio SVN
     preBuildScripts:
       - name: Validate bundled SVN runtime
         basedOnDependencyAnalysis: false

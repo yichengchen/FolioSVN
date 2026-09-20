@@ -79,6 +79,7 @@
 		36FDB96A67EE91169EF67E56 /* SVNExecutableResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNExecutableResolverTests.swift; sourceTree = "<group>"; };
 		3FBA22F2201413ECFCCF4781 /* RepositoryProfileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryProfileStore.swift; sourceTree = "<group>"; };
 		4343591CDECBF972CA828010 /* SVNExecutableResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNExecutableResolver.swift; sourceTree = "<group>"; };
+		43609872D83FA883FADEBDEF /* Folio SVN.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Folio SVN.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		450A95C0A941F925A26B85F3 /* BrowserViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserViewModel.swift; sourceTree = "<group>"; };
 		45E5DD04446455285F4C401A /* SVNLogDTO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNLogDTO.swift; sourceTree = "<group>"; };
 		4AE805CAA329E88EC808BC83 /* svn-list.xml */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = "svn-list.xml"; sourceTree = "<group>"; };
@@ -86,7 +87,6 @@
 		4D9237E196E1E11361C04D89 /* RepositoryPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryPath.swift; sourceTree = "<group>"; };
 		4DA878CC0735BCC2B424541A /* RepositoryPathTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryPathTests.swift; sourceTree = "<group>"; };
 		61B3A204B0D9A93BE2FDCDDD /* SVNClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNClient.swift; sourceTree = "<group>"; };
-		6B0C5D5A602706CF0176168A /* SVNClient.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SVNClient.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6D3ECDE1D40FE4F629E9E4BB /* FileHistoryViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileHistoryViewController.swift; sourceTree = "<group>"; };
 		70280189C97E8E0581F9FCA9 /* SVNCommandRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNCommandRunner.swift; sourceTree = "<group>"; };
 		7525955FB7BEA33A10954D6F /* RepositoryProfileStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryProfileStoreTests.swift; sourceTree = "<group>"; };
@@ -204,7 +204,7 @@
 		61B9FE956C71BDE6D9637A0C /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				6B0C5D5A602706CF0176168A /* SVNClient.app */,
+				43609872D83FA883FADEBDEF /* Folio SVN.app */,
 				1BF35251B9E18628C9A9DAD9 /* SVNClientTests.xctest */,
 			);
 			name = Products;
@@ -350,7 +350,7 @@
 				F65BFABADB2F1B98B144FB57 /* KeychainAccess */,
 			);
 			productName = SVNClient;
-			productReference = 6B0C5D5A602706CF0176168A /* SVNClient.app */;
+			productReference = 43609872D83FA883FADEBDEF /* Folio SVN.app */;
 			productType = "com.apple.product-type.application";
 		};
 		B4F9EF659BB5F852F3068A94 /* SVNClientTests */ = {
