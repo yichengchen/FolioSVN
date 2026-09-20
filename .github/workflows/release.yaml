@@ -143,37 +143,9 @@ jobs:
           echo "RELEASE_APP_PATH=$app" >> "$GITHUB_ENV"
           Scripts/validate-svn-runtime.sh "$app/Contents/Resources/SVNRuntime"
           codesign --verify --deep --strict --verbose=2 "$app"
-          ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/notarization.zip"
 
-      - name: Notarize app and require Accepted status
-        env:
-          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
-          NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
+      - name: Create signed DMG
         run: |
-          umask 077
-          credentials=(--apple-id "$NOTARY_APPLE_ID" --password "$NOTARY_APP_PASSWORD" --team-id "$DEVELOPMENT_TEAM")
-          submit_exit=0
-          xcrun notarytool submit "$RUNNER_TEMP/notarization.zip" \
-            "${credentials[@]}" --wait --timeout 60m --output-format json \
-            > "$RUNNER_TEMP/notarization-result.json" || submit_exit=$?
-          cat "$RUNNER_TEMP/notarization-result.json"
-          submission_id="$(jq -r '.id // empty' "$RUNNER_TEMP/notarization-result.json")"
-          status="$(jq -r '.status // empty' "$RUNNER_TEMP/notarization-result.json")"
-          if [[ "$submit_exit" -ne 0 || "$status" != Accepted ]]; then
-            if [[ -n "$submission_id" ]]; then
-              xcrun notarytool log "$submission_id" "${credentials[@]}" \
-                "$RUNNER_TEMP/notarization-log.json" && cat "$RUNNER_TEMP/notarization-log.json" || true
-            fi
-            echo "::error::Notarization did not succeed (status: $status); no release will be published"
-            exit 1
-          fi
-
-      - name: Staple app and create signed DMG
-        run: |
-          xcrun stapler staple "$RELEASE_APP_PATH"
-          xcrun stapler validate "$RELEASE_APP_PATH"
-          codesign --verify --deep --strict --verbose=2 "$RELEASE_APP_PATH"
-          spctl --assess --type execute --verbose=2 "$RELEASE_APP_PATH"
           mkdir -p "$RUNNER_TEMP/release-assets"
           staging="$RUNNER_TEMP/dmg-staging"
           mkdir -p "$staging"
@@ -235,7 +207,16 @@ jobs:
           codesign --verify --strict --verbose=2 "$dmg"
           hdiutil verify "$dmg"
           spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
-          (cd "$RUNNER_TEMP/release-assets" && shasum -a 256 "$asset" > SHA256SUMS)
+          mount_point="$RUNNER_TEMP/verify-dmg"
+          mkdir -p "$mount_point"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_point"
+          trap 'hdiutil detach "$mount_point" >/dev/null' EXIT
+          mounted_app="$mount_point/$(basename "$RELEASE_APP_PATH")"
+          test -d "$mounted_app"
+          codesign --verify --deep --strict --verbose=2 "$mounted_app"
+          spctl --assess --type execute --verbose=2 "$mounted_app"
+          hdiutil detach "$mount_point"
+          trap - EXIT
 
       - name: Publish GitHub Release
         env:
@@ -249,8 +230,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --verify-tag --title "Folio SVN $GITHUB_REF_NAME" --generate-notes \
             "${prerelease[@]}" \
-            "$RUNNER_TEMP/release-assets/FolioSVN-${GITHUB_REF_NAME}.dmg" \
-            "$RUNNER_TEMP/release-assets/SHA256SUMS"
+            "$RUNNER_TEMP/release-assets/FolioSVN-${GITHUB_REF_NAME}.dmg"
 
       - name: Remove signing and notarization credentials
         if: always()
