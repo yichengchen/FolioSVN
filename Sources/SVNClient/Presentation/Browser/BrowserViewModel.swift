@@ -301,21 +301,12 @@ final class BrowserViewModel {
         } else {
             throw SVNClientError.invalidLocalFile("找不到可用于重置的原始副本")
         }
-        let temporaryURL = document.localURL.deletingLastPathComponent()
-            .appendingPathComponent(".svnclient-reset-\(UUID().uuidString)")
-        try FileManager.default.copyItem(at: sourceURL, to: temporaryURL)
-        do {
-            _ = try FileManager.default.replaceItemAt(document.localURL, withItemAt: temporaryURL)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: document.localURL.path)
-            document.manifest.baseline = try openDocumentFingerprint(at: document.localURL)
-            try writeOpenDocumentManifest(document)
-            openDocuments[document.manifest.id] = document
-            noticeText = "已放弃“\(document.manifest.displayName)”的本地修改"
-            onChange?()
-        } catch {
-            try? FileManager.default.removeItem(at: temporaryURL)
-            throw error
-        }
+        try overwriteOpenDocument(at: document.localURL, withContentsOf: sourceURL)
+        document.manifest.baseline = try openDocumentFingerprint(at: document.localURL)
+        try writeOpenDocumentManifest(document)
+        openDocuments[document.manifest.id] = document
+        noticeText = "已放弃“\(document.manifest.displayName)”的本地修改"
+        onChange?()
     }
 
     init(svnClient: any SVNClient, metadataService: RepositoryMetadataService? = nil, cacheRootURL: URL? = nil) {
@@ -1825,6 +1816,24 @@ final class BrowserViewModel {
             modifiedAt: attributes[.modificationDate] as? Date,
             byteSize: (attributes[.size] as? NSNumber)?.int64Value
         )
+    }
+
+    private func overwriteOpenDocument(at destinationURL: URL, withContentsOf sourceURL: URL) throws {
+        // Keep the existing inode so resetting a document does not require replacing a file
+        // that may still be open in Word or another editor.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: destinationURL.path
+        )
+        let source = try FileHandle(forReadingFrom: sourceURL)
+        defer { try? source.close() }
+        let destination = try FileHandle(forWritingTo: destinationURL)
+        defer { try? destination.close() }
+        try destination.truncate(atOffset: 0)
+        while let chunk = try source.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            try destination.write(contentsOf: chunk)
+        }
+        try destination.synchronize()
     }
 
     private func modifiedDocument(for sourceURL: URL, profileID: UUID) -> TrackedOpenDocument? {

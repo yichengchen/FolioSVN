@@ -659,12 +659,19 @@ final class BrowserViewModelTests: XCTestCase {
         try await model.connect(to: URL(string: "https://example.com/root")!)
         let row = try XCTUnwrap(model.rows.first(where: { $0.kind == .file }))
         let localURL = try await model.localURLForOpening(row)
+        let originalFileNumber = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: localURL.path)[.systemFileNumber] as? NSNumber
+        )
 
         try Data("discard this".utf8).write(to: localURL)
         XCTAssertTrue(model.hasLocalChanges(for: row))
         try model.discardLocalChanges(for: row)
         XCTAssertFalse(model.hasLocalChanges(for: row))
         XCTAssertEqual(try String(contentsOf: localURL, encoding: .utf8), "r4")
+        let resetFileNumber = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: localURL.path)[.systemFileNumber] as? NSNumber
+        )
+        XCTAssertEqual(resetFileNumber, originalFileNumber, "Resetting keeps the editor's open file in place")
 
         try Data("committed baseline".utf8).write(to: localURL)
         let change = try XCTUnwrap(model.modifiedOpenDocuments.first)
