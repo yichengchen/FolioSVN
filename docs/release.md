@@ -2,7 +2,7 @@
 
 `.github/workflows/release.yaml` 在推送 `v1.0.0` 或 `v1.0.0-beta.1` 形式的 tag 时运行。只发布 arm64、macOS 26+ 版本。预发布 tag 会创建 GitHub prerelease。
 
-流程：构建 Word diff runtime → 导入临时签名钥匙串 → Developer ID Archive → 应用公证/staple/验证 → 创建并签名 DMG → DMG 公证/staple/验证 → GitHub Release。Debug 测试和无签名 Release 构建由同一提交触发的 CI 负责，Release 工作流不重复执行测试。应用和 DMG 都带公证票据。使用 Xcode 默认 DerivedData；Archive 和临时文件在 runner 临时目录中。任一公证非 Accepted 时都不会发布。中间 ZIP 仅用于应用公证，不作为 Release 资产上传。
+流程：构建 Word diff runtime → 导入临时签名钥匙串 → Developer ID Archive → 应用公证/staple/验证 → 创建并签名 DMG → DMG 公证/staple/验证 → GitHub Release。Debug 测试和无签名 Release 构建由 tag 所在提交此前的分支/PR CI 负责，Release 工作流不重复执行测试；单独推送 tag 不会再次触发 CI。应用和 DMG 都带公证票据。使用 Xcode 默认 DerivedData；Archive 和临时文件在 runner 临时目录中。任一公证非 Accepted 时都不会发布。中间 ZIP 仅用于应用公证，不作为 Release 资产上传。
 
 ## 一次性配置
 

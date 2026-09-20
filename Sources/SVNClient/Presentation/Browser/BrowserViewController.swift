@@ -163,7 +163,6 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private func configureTableView() {
         let columns: [(String, String, CGFloat)] = [
             ("name", "名称", 210),
-            ("type", "类型", 65),
             ("size", "大小", 70),
             ("modified", "修改时间", 120),
             ("author", "修改人", 75),
@@ -1833,13 +1832,23 @@ extension BrowserViewController: NSOutlineViewDelegate {
         let cell = outlineView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
             ?? NSTableCellView()
         cell.identifier = identifier
-        cell.textField = cell.textField ?? NSTextField(labelWithString: "")
-        if cell.textField?.superview == nil, let textField = cell.textField {
-            cell.addSubview(textField)
-            textField.lineBreakMode = .byTruncatingTail
-            textField.snp.makeConstraints { $0.leading.trailing.equalToSuperview().inset(6); $0.centerY.equalToSuperview() }
+        let textField: NSTextField
+        if let existingTextField = cell.textField {
+            textField = existingTextField
+        } else {
+            let createdTextField = NSTextField(labelWithString: "")
+            textField = createdTextField
+            // NSTableCellView.textField is an assign outlet. Add the field first so the
+            // view hierarchy retains it before assigning the outlet reference.
+            cell.addSubview(createdTextField)
+            cell.textField = createdTextField
+            createdTextField.lineBreakMode = .byTruncatingTail
+            createdTextField.snp.makeConstraints {
+                $0.leading.trailing.equalToSuperview().inset(6)
+                $0.centerY.equalToSuperview()
+            }
         }
-        cell.textField?.stringValue = browserRow.value(for: tableColumn.identifier.rawValue)
+        textField.stringValue = browserRow.value(for: tableColumn.identifier.rawValue)
         return cell
     }
 
