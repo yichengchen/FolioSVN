@@ -228,6 +228,7 @@ final class BrowserViewModel {
     private let svnClient: any SVNClient
     private let metadataService: RepositoryMetadataService?
     private let cacheRootURL: URL?
+    private let ownsEphemeralCacheRoot: Bool
     private let openDocumentSessionID = UUID()
     private static let abandonedOpenDocumentRetention: TimeInterval = 7 * 24 * 60 * 60
     private static let openDocumentManifestName = ".svnclient-open-document.json"
@@ -312,9 +313,25 @@ final class BrowserViewModel {
     init(svnClient: any SVNClient, metadataService: RepositoryMetadataService? = nil, cacheRootURL: URL? = nil) {
         self.svnClient = svnClient
         self.metadataService = metadataService
-        self.cacheRootURL = cacheRootURL
+        if let cacheRootURL {
+            self.cacheRootURL = cacheRootURL
+            ownsEphemeralCacheRoot = false
+        } else if AppRuntimeEnvironment.isRunningTests() {
+            self.cacheRootURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("FolioSVNTests-\(UUID().uuidString)", isDirectory: true)
+            ownsEphemeralCacheRoot = true
+        } else {
+            self.cacheRootURL = nil
+            ownsEphemeralCacheRoot = false
+        }
         try? loadTrackedOpenDocuments()
         try? cleanupAbandonedOpenDocumentCopies()
+    }
+
+    deinit {
+        if ownsEphemeralCacheRoot, let cacheRootURL {
+            try? FileManager.default.removeItem(at: cacheRootURL)
+        }
     }
 
     func connect(to url: URL, options: SVNRequestOptions = .anonymous) async throws {
@@ -1265,14 +1282,27 @@ final class BrowserViewModel {
                 standardError: "already exists: \(conflict.lastPathComponent)"
             ))
         }
-        let totalBytes = files.reduce(Int64(0)) { partial, url in
-            let values = try? url.resourceValues(forKeys: [.fileSizeKey])
-            return partial + Int64(values?.fileSize ?? 0)
+        var fileCount = 0
+        var directoryCount = 0
+        var totalFileBytes: Int64 = 0
+        for url in files {
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+            if values?.isDirectory == true {
+                directoryCount += 1
+            } else {
+                fileCount += 1
+                totalFileBytes += Int64(values?.fileSize ?? 0)
+            }
         }
+        var detailParts: [String] = []
+        if fileCount > 0 {
+            detailParts.append("\(fileCount) 个文件 · \(ByteCountFormatter.string(fromByteCount: totalFileBytes, countStyle: .file))")
+        }
+        if directoryCount > 0 { detailParts.append("\(directoryCount) 个文件夹") }
         let result = try await performTransfer(
             kind: .upload,
-            title: "上传 \(files.count) 个文件",
-            detail: ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file),
+            title: "上传 \(files.count) 个项目",
+            detail: detailParts.joined(separator: " · "),
             cancellable: true,
             outputURL: nil,
             retryRequest: nil

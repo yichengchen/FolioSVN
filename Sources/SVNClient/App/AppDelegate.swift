@@ -5,6 +5,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var coordinator: MainCoordinator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Hosted unit tests launch the application executable before loading the test bundle.
+        // Never initialize production persistence, Keychain, UserDefaults, or windows in that process.
+        guard !AppRuntimeEnvironment.isRunningTests() else { return }
         installMainMenu()
         do {
             let coordinator = try MainCoordinator()

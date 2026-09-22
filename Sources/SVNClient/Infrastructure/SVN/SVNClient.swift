@@ -565,8 +565,10 @@ final class SVNCLIGateway: SVNClient, Sendable {
             throw SVNClientError.duplicateLocalFileName(duplicate)
         }
         for fileURL in files {
-            var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            let values = try? fileURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey])
+            guard !Self.isExcludedUploadMetadata(fileURL.lastPathComponent),
+                  values?.isSymbolicLink != true,
+                  values?.isRegularFile == true || values?.isDirectory == true else {
                 throw SVNClientError.invalidLocalFile(fileURL.lastPathComponent)
             }
         }
@@ -574,12 +576,12 @@ final class SVNCLIGateway: SVNClient, Sendable {
         return try await withTemporaryWorkingCopy(for: directoryURL, options: options) { workspaceURL in
             let localTargets = try files.map { sourceURL in
                 let targetURL = workspaceURL.appendingPathComponent(sourceURL.lastPathComponent)
-                try FileManager.default.copyItem(at: sourceURL, to: targetURL)
+                try Self.copyUploadItem(from: sourceURL, to: targetURL)
                 return targetURL
             }
             _ = try await self.executeAuthenticated(
                 operation: "add",
-                arguments: ["add"] + localTargets.map { Self.svnTarget($0.path) },
+                arguments: ["add", "--force", "--no-ignore"] + localTargets.map { Self.svnTarget($0.path) },
                 urls: [directoryURL],
                 options: options
             )
@@ -591,6 +593,67 @@ final class SVNCLIGateway: SVNClient, Sendable {
             )
             return SVNWriteResult(revision: Self.parseCommittedRevision(output))
         }
+    }
+
+    static func copyUploadItem(from sourceURL: URL, to targetURL: URL) throws {
+        try Task.checkCancellation()
+        let fileManager = FileManager.default
+        let values = try sourceURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey])
+        guard values.isSymbolicLink != true else {
+            throw SVNClientError.invalidLocalFile(sourceURL.lastPathComponent)
+        }
+        if values.isRegularFile == true {
+            try copyUploadFile(from: sourceURL, to: targetURL, fileManager: fileManager)
+            return
+        }
+        guard values.isDirectory == true else {
+            throw SVNClientError.invalidLocalFile(sourceURL.lastPathComponent)
+        }
+
+        try fileManager.createDirectory(at: targetURL, withIntermediateDirectories: false)
+        let children = try fileManager.contentsOfDirectory(
+            at: sourceURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: []
+        )
+        for childURL in children where !isExcludedUploadMetadata(childURL.lastPathComponent) {
+            try Task.checkCancellation()
+            try copyUploadItem(
+                from: childURL,
+                to: targetURL.appendingPathComponent(childURL.lastPathComponent)
+            )
+        }
+    }
+
+    private static func copyUploadFile(from sourceURL: URL, to targetURL: URL, fileManager: FileManager) throws {
+        guard fileManager.createFile(atPath: targetURL.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: targetURL.path])
+        }
+        let source = try FileHandle(forReadingFrom: sourceURL)
+        let destination = try FileHandle(forWritingTo: targetURL)
+        defer {
+            try? source.close()
+            try? destination.close()
+        }
+
+        while true {
+            try Task.checkCancellation()
+            guard let chunk = try source.read(upToCount: 1_048_576), !chunk.isEmpty else { break }
+            try destination.write(contentsOf: chunk)
+        }
+        try Task.checkCancellation()
+
+        let sourceAttributes = try fileManager.attributesOfItem(atPath: sourceURL.path)
+        var preservedAttributes: [FileAttributeKey: Any] = [:]
+        preservedAttributes[.posixPermissions] = sourceAttributes[.posixPermissions]
+        preservedAttributes[.modificationDate] = sourceAttributes[.modificationDate]
+        try fileManager.setAttributes(preservedAttributes, ofItemAtPath: targetURL.path)
+    }
+
+    private static func isExcludedUploadMetadata(_ name: String) -> Bool {
+        name.caseInsensitiveCompare(".svn") == .orderedSame
+            || name == ".DS_Store"
+            || name.hasPrefix("._")
     }
 
     func replace(

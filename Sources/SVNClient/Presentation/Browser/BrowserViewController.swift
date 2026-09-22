@@ -4,18 +4,18 @@ import SnapKit
 import UniformTypeIdentifiers
 
 struct BrowserUploadPlan: Equatable, Sendable {
-    let uploadableFiles: [URL]
+    let uploadableItems: [URL]
     let conflictNames: [String]
 }
 
-func makeBrowserUploadPlan(files: [URL], existingNames: Set<String>) -> BrowserUploadPlan {
-    let localNameGroups = Dictionary(grouping: files, by: \.lastPathComponent)
+func makeBrowserUploadPlan(items: [URL], existingNames: Set<String>) -> BrowserUploadPlan {
+    let localNameGroups = Dictionary(grouping: items, by: \.lastPathComponent)
     let duplicateLocalNames = Set(localNameGroups.compactMap { name, values in
         values.count > 1 ? name : nil
     })
     let conflictNames = duplicateLocalNames.union(existingNames.intersection(localNameGroups.keys))
     return BrowserUploadPlan(
-        uploadableFiles: files.filter { !conflictNames.contains($0.lastPathComponent) },
+        uploadableItems: items.filter { !conflictNames.contains($0.lastPathComponent) },
         conflictNames: conflictNames.sorted()
     )
 }
@@ -934,9 +934,9 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private func chooseFilesForUpload(targetDirectory: BrowserTreeNode? = nil) {
         guard canModifyRepository else { return }
         let panel = NSOpenPanel()
-        panel.title = targetDirectory.map { "选择要上传到“\($0.row.name)”的文件" } ?? "选择要上传的文件"
+        panel.title = targetDirectory.map { "选择要上传到“\($0.row.name)”的文件或文件夹" } ?? "选择要上传的文件或文件夹"
         panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = true
         panel.canChooseFiles = true
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
 
@@ -950,13 +950,19 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
 
     private func handleFilesForUpload(_ urls: [URL], targetDirectory: BrowserTreeNode? = nil) {
         guard canModifyRepository, !urls.isEmpty else { return }
-        let files = Array(Dictionary(grouping: urls.map(\.standardizedFileURL), by: \.path).compactMap(\.value.first))
-        let invalidURL = files.first { url in
-            let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
-            return values?.isRegularFile != true
+        let items = Array(Dictionary(grouping: urls.map(\.standardizedFileURL), by: \.path).compactMap(\.value.first))
+        let invalidURL = items.first { url in
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey])
+            let name = url.lastPathComponent
+            let isSystemMetadata = name.caseInsensitiveCompare(".svn") == .orderedSame
+                || name == ".DS_Store"
+                || name.hasPrefix("._")
+            return isSystemMetadata
+                || values?.isSymbolicLink == true
+                || (values?.isRegularFile != true && values?.isDirectory != true)
         }
         guard invalidURL == nil else {
-            presentError(message: "当前仅支持上传文件，暂不支持直接拖入文件夹。")
+            presentError(message: "仅支持上传普通文件和文件夹；符号链接、“.svn”和 macOS 系统元数据不会上传。")
             return
         }
 
@@ -965,7 +971,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
                 let targetRows = try await self.viewModel.rows(in: targetDirectory.row.url)
                 guard self.canModifyRepository, self.treeContains(targetDirectory) else { return }
                 self.prepareUpload(
-                    files: files,
+                    items: items,
                     targetDirectory: targetDirectory,
                     targetRows: targetRows
                 )
@@ -974,66 +980,87 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         }
 
         prepareUpload(
-            files: files,
+            items: items,
             targetDirectory: targetDirectory,
             targetRows: targetDirectory?.children?.map(\.row) ?? viewModel.rows
         )
     }
 
     private func prepareUpload(
-        files: [URL],
+        items: [URL],
         targetDirectory: BrowserTreeNode?,
         targetRows: [BrowserRow]
     ) {
-        guard canModifyRepository, !files.isEmpty else { return }
+        guard canModifyRepository, !items.isEmpty else { return }
         let existing = Dictionary(uniqueKeysWithValues: targetRows.map { ($0.name, $0) })
-        let remoteConflicts = files.compactMap { localURL in
+        let remoteConflicts = items.compactMap { localURL in
             existing[localURL.lastPathComponent].map { row in (localURL, row) }
         }
-        if files.count == 1, let (localURL, row) = remoteConflicts.first, row.kind == .file {
+        if items.count == 1,
+           let (localURL, row) = remoteConflicts.first,
+           row.kind == .file,
+           (try? localURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
             confirmReplace(row: row, localURL: localURL)
             return
         }
 
-        let plan = makeBrowserUploadPlan(files: files, existingNames: Set(existing.keys))
+        let plan = makeBrowserUploadPlan(items: items, existingNames: Set(existing.keys))
         if !plan.conflictNames.isEmpty {
             let alert = NSAlert()
             alert.alertStyle = .warning
-            alert.messageText = "有 \(files.count - plan.uploadableFiles.count) 个文件存在名称冲突"
+            alert.messageText = "有 \(items.count - plan.uploadableItems.count) 个项目存在名称冲突"
             let names = plan.conflictNames.prefix(4).joined(separator: "、")
             let suffix = plan.conflictNames.count > 4 ? "等" : ""
-            if plan.uploadableFiles.isEmpty {
-                alert.informativeText = "冲突文件：\(names)\(suffix)。没有可以直接上传的文件；已有文件请单独执行替换。"
+            if plan.uploadableItems.isEmpty {
+                alert.informativeText = "冲突项目：\(names)\(suffix)。没有可以直接上传的项目；已有文件可单独执行替换，同名文件夹不会自动合并。"
                 alert.addButton(withTitle: "好")
                 alert.runModal()
                 return
             }
-            alert.informativeText = "将跳过：\(names)\(suffix)，继续上传其余 \(plan.uploadableFiles.count) 个文件。已有文件可稍后单独执行替换。"
-            alert.addButton(withTitle: "上传其余文件")
+            alert.informativeText = "将跳过：\(names)\(suffix)，继续上传其余 \(plan.uploadableItems.count) 个项目。已有文件可稍后单独执行替换，同名文件夹不会自动合并。"
+            alert.addButton(withTitle: "上传其余项目")
             alert.addButton(withTitle: "取消")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
 
-        let totalBytes = plan.uploadableFiles.reduce(Int64(0)) { partial, url in
-            let values = try? url.resourceValues(forKeys: [.fileSizeKey])
-            return partial + Int64(values?.fileSize ?? 0)
-        }
+        let selection = uploadSelectionDescription(plan.uploadableItems)
         let destinationName = targetDirectory?.row.name ?? "当前文件夹"
-        let details = "将上传 \(plan.uploadableFiles.count) 个文件（\(ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file))）到“\(destinationName)”，并作为一次提交。"
+        let details = "将上传\(selection)到“\(destinationName)”，并作为一次提交。文件夹会递归上传，同名文件夹不会自动合并。"
         guard let message = prompt(
             title: "确认上传",
             message: details,
             fieldLabel: "提交说明",
-            initialValue: "上传 \(plan.uploadableFiles.count) 个文件",
+            initialValue: "上传 \(plan.uploadableItems.count) 个项目",
             confirmTitle: "上传"
         ) else { return }
         run {
             _ = try await self.viewModel.upload(
-                files: plan.uploadableFiles,
+                files: plan.uploadableItems,
                 to: targetDirectory?.row.url,
                 message: message
             )
         }
+    }
+
+    private func uploadSelectionDescription(_ items: [URL]) -> String {
+        var fileCount = 0
+        var directoryCount = 0
+        var totalFileBytes: Int64 = 0
+        for url in items {
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+            if values?.isDirectory == true {
+                directoryCount += 1
+            } else {
+                fileCount += 1
+                totalFileBytes += Int64(values?.fileSize ?? 0)
+            }
+        }
+        var parts: [String] = []
+        if fileCount > 0 {
+            parts.append("\(fileCount) 个文件（\(ByteCountFormatter.string(fromByteCount: totalFileBytes, countStyle: .file))）")
+        }
+        if directoryCount > 0 { parts.append("\(directoryCount) 个文件夹") }
+        return parts.joined(separator: "、")
     }
 
     @objc private func replaceSelectedItem() {

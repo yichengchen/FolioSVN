@@ -94,7 +94,9 @@ targets:
         ENABLE_HARDENED_RUNTIME: YES
       configs:
         Debug:
-          CODE_SIGN_IDENTITY: Apple Development
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "-"
+          DEVELOPMENT_TEAM: ""
         Release:
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: Developer ID Application
@@ -118,6 +120,9 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Folio SVN.app/Contents/MacOS/Folio SVN"
         BUNDLE_LOADER: "$(TEST_HOST)"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
 schemes:
   SVNClient:
     build:

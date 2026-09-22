@@ -73,6 +73,30 @@ final class SVNCLIGatewayTests: XCTestCase {
         XCTAssertLessThan(startedCancelling.duration(to: clock.now), .seconds(2))
     }
 
+    func testUploadCopyStopsBeforeTouchingDestinationWhenTaskIsCancelled() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("upload-copy-cancel-\(UUID())")
+        let source = root.appendingPathComponent("source.txt")
+        let destination = root.appendingPathComponent("destination.txt")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("content".utf8).write(to: source)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let task = Task { () -> Error? in
+            while !Task.isCancelled { await Task.yield() }
+            do {
+                try SVNCLIGateway.copyUploadItem(from: source, to: destination)
+                return nil
+            } catch {
+                return error
+            }
+        }
+        task.cancel()
+
+        let error = await task.value
+        XCTAssertTrue(error is CancellationError)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+    }
+
     func testVersionUsesExpectedProcessArguments() async throws {
         let runner = MockSVNCommandRunner(output: .success(stdout: "1.14.5\n"))
         let gateway = makeMockGateway(runner)

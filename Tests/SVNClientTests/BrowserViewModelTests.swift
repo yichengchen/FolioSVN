@@ -1197,6 +1197,27 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.transfers.isEmpty)
     }
 
+    func testDefaultManagedCacheIsEphemeralDuringHostedTests() async throws {
+        let client = StabilitySVNClient()
+        var viewModel: BrowserViewModel? = BrowserViewModel(svnClient: client)
+        try await viewModel?.connect(to: URL(string: "https://svn.example.com/repo/")!)
+        let row = try XCTUnwrap(viewModel?.rows.first(where: { $0.kind == .file }))
+
+        let snapshotURL = try await viewModel?.localSnapshotURL(for: row)
+        let resolvedSnapshotURL = try XCTUnwrap(snapshotURL)
+        let components = (resolvedSnapshotURL.path as NSString).pathComponents
+        let rootIndex = try XCTUnwrap(components.firstIndex(where: { $0.hasPrefix("FolioSVNTests-") }))
+        let ephemeralRoot = URL(
+            fileURLWithPath: NSString.path(withComponents: Array(components[...rootIndex])),
+            isDirectory: true
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ephemeralRoot.path))
+
+        viewModel = nil
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ephemeralRoot.path))
+    }
+
     func testCancellingDownloadMarksTransferAsCancelled() async throws {
         let client = CancellableTransferSVNClient()
         let viewModel = BrowserViewModel(svnClient: client)
@@ -1234,11 +1255,11 @@ final class BrowserViewModelTests: XCTestCase {
         let duplicateB = URL(fileURLWithPath: "/tmp/b/duplicate.txt")
 
         let plan = makeBrowserUploadPlan(
-            files: [first, second, duplicateA, duplicateB],
+            items: [first, second, duplicateA, duplicateB],
             existingNames: ["already.txt"]
         )
 
-        XCTAssertEqual(plan.uploadableFiles, [second])
+        XCTAssertEqual(plan.uploadableItems, [second])
         XCTAssertEqual(plan.conflictNames, ["already.txt", "duplicate.txt"])
     }
 

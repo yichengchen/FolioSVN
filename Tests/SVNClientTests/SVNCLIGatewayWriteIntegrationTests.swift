@@ -194,6 +194,72 @@ final class SVNCLIGatewayWriteIntegrationTests: XCTestCase {
         }
     }
 
+    func testUploadDirectoryRecursivelyAsOneCommit() async throws {
+        guard SVNExecutableResolver.resolve(command: "svn") != nil,
+              SVNExecutableResolver.resolve(command: "svnadmin") != nil else {
+            throw XCTSkip("svn and svnadmin are required for the local integration test")
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SVNClientFolderUploadTests-\(UUID().uuidString)", isDirectory: true)
+        let repositoryPath = root.appendingPathComponent("repository", isDirectory: true)
+        let sourceFolder = root.appendingPathComponent("项目资料", isDirectory: true)
+        let standaloneFile = root.appendingPathComponent("清单.txt")
+        let nestedFolder = sourceFolder.appendingPathComponent("设计", isDirectory: true)
+        let emptyFolder = sourceFolder.appendingPathComponent("空目录", isDirectory: true)
+        let svnMetadataFolder = sourceFolder.appendingPathComponent(".svn", isDirectory: true)
+        try FileManager.default.createDirectory(at: nestedFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: emptyFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: svnMetadataFolder, withIntermediateDirectories: true)
+        try Data("接口规范".utf8).write(to: nestedFolder.appendingPathComponent("说明.txt"))
+        try Data("项目清单".utf8).write(to: standaloneFile)
+        try Data("system metadata".utf8).write(to: sourceFolder.appendingPathComponent(".DS_Store"))
+        try Data("working copy metadata".utf8).write(to: svnMetadataFolder.appendingPathComponent("wc.db"))
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try run("svnadmin", ["create", repositoryPath.path])
+
+        let repositoryURL = URL(fileURLWithPath: repositoryPath.path)
+        let gateway = SVNCLIGateway()
+        let result = try await gateway.upload(
+            files: [sourceFolder, standaloneFile],
+            to: repositoryURL,
+            message: "上传项目资料",
+            options: .anonymous
+        )
+
+        XCTAssertEqual(result.revision, 1)
+        let entries = try await gateway.listRecursively(url: repositoryURL, options: .anonymous)
+        XCTAssertEqual(Set(entries.map(\.name)), [
+            "项目资料",
+            "项目资料/设计",
+            "项目资料/设计/说明.txt",
+            "项目资料/空目录",
+            "清单.txt"
+        ])
+
+        let exportedFolder = root.appendingPathComponent("exported", isDirectory: true)
+        try await gateway.export(
+            url: repositoryURL.appendingPathComponent("项目资料", isDirectory: true),
+            to: exportedFolder,
+            revision: nil,
+            overwrite: false,
+            options: .anonymous
+        )
+        XCTAssertEqual(
+            try String(contentsOf: exportedFolder.appendingPathComponent("设计/说明.txt"), encoding: .utf8),
+            "接口规范"
+        )
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: exportedFolder.appendingPathComponent("空目录").path,
+            isDirectory: &isDirectory
+        ))
+        XCTAssertTrue(isDirectory.boolValue)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: exportedFolder.appendingPathComponent(".svn").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: exportedFolder.appendingPathComponent(".DS_Store").path))
+    }
+
     @discardableResult
     private func run(_ command: String, _ arguments: [String]) throws -> Data {
         let process = Process()
