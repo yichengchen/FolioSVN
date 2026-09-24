@@ -24,6 +24,7 @@ func makeBrowserUploadPlan(items: [URL], existingNames: Set<String>) -> BrowserU
 final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMenuDelegate, @preconcurrency QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     var onNavigationStateChange: (() -> Void)?
     var onCancelConnection: (() -> Void)?
+    var onCheckoutRequested: ((UUID, URL, String) -> Void)?
 
     private let viewModel: BrowserViewModel
     private let breadcrumbStack = NSStackView()
@@ -47,6 +48,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     private var removeFavoriteMenuItem: NSMenuItem?
     private var uploadHereMenuItem: NSMenuItem?
     private var newFolderHereMenuItem: NSMenuItem?
+    private var checkoutMenuItem: NSMenuItem?
     private var operationTask: Task<Void, Never>?
     private var operationTaskID: UUID?
     private var searchTask: Task<Void, Never>?
@@ -116,6 +118,9 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             && !viewModel.hasActiveWriteTransfer
     }
     var hasRepositoryConnection: Bool { viewModel.currentURL != nil }
+    var canCheckoutCurrentDirectory: Bool {
+        viewModel.currentURL != nil && viewModel.session != nil && !viewModel.isBusy
+    }
     var currentSearchQuery: String { viewModel.searchQuery }
 
     func navigateBack() { run { try await self.viewModel.goBack() } }
@@ -142,6 +147,11 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     }
     func createFolder() { promptForNewFolder() }
     func uploadFiles() { chooseFilesForUpload() }
+    func checkoutCurrentDirectory() {
+        guard let url = viewModel.currentURL, let session = viewModel.session else { return }
+        let decodedName = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+        onCheckoutRequested?(session.profileID, url, decodedName.isEmpty ? session.displayName : decodedName)
+    }
     func updateSearch(query: String) {
         searchTask?.cancel()
         if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -218,6 +228,11 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         uploadHereMenuItem = uploadHere
         let newFolderHere = menu.addItem(withTitle: "在这里新建文件夹…", action: #selector(createFolderInSelectedFolder), keyEquivalent: "")
         newFolderHereMenuItem = newFolderHere
+        checkoutMenuItem = menu.addItem(
+            withTitle: "检出为工作副本…",
+            action: #selector(checkoutSelectedDirectory),
+            keyEquivalent: ""
+        )
         let favoriteItem = menu.addItem(withTitle: "添加到收藏", action: #selector(toggleFavoriteForSelectedItem), keyEquivalent: "")
         favoriteMenuItem = favoriteItem
         let removeFavoriteItem = menu.addItem(withTitle: "从收藏移除", action: #selector(removeFavoritesForSelectedItems), keyEquivalent: "")
@@ -239,6 +254,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
     func menuWillOpen(_ menu: NSMenu) {
         guard menu === outlineView.menu else { return }
         resetLocalChangesMenuItem?.isHidden = true
+        checkoutMenuItem?.isHidden = true
         if let event = NSApp.currentEvent, event.window === view.window {
             let point = outlineView.convert(event.locationInWindow, from: nil)
             let clickedRow = outlineView.row(at: point)
@@ -267,6 +283,7 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
         guard let row = rows.first else { return }
         uploadHereMenuItem?.isHidden = !isSingleSelection || row.kind != .directory
         newFolderHereMenuItem?.isHidden = !isSingleSelection || row.kind != .directory
+        checkoutMenuItem?.isHidden = !isSingleSelection || row.kind != .directory
     }
 
     private func configureLayout() {
@@ -803,6 +820,13 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
 
     @objc private func uploadFilesFromMenu() {
         uploadFiles()
+    }
+
+    @objc private func checkoutSelectedDirectory() {
+        guard let row = selectedRow,
+              row.kind == .directory,
+              let profileID = viewModel.session?.profileID else { return }
+        onCheckoutRequested?(profileID, row.url, row.name)
     }
 
     @objc private func downloadSelectedItem() {
@@ -1719,6 +1743,9 @@ final class BrowserViewController: NSViewController, NSMenuItemValidation, NSMen
             return canModifyRepository
         }
         guard rows.count == 1, let row = rows.first else { return false }
+        if menuItem.action == #selector(checkoutSelectedDirectory) {
+            return row.kind == .directory && viewModel.session != nil
+        }
         if menuItem.action == #selector(replaceSelectedItem) {
             return row.kind == .file && canModifyRepository
         }

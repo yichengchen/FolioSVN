@@ -1,10 +1,15 @@
 import AppKit
+import SnapKit
 
 final class MainWindowController: NSWindowController {
     var onConnectRepository: (() -> Void)?
     private let browserViewController: BrowserViewController
+    private let workingCopyViewController: WorkingCopyViewController?
+    private let contentContainerController = MainContentViewController()
     private let searchField = NSSearchField()
     private var synchronizedSearchQuery = ""
+    private enum ContentMode { case repository, workingCopy }
+    private var contentMode = ContentMode.repository
 
     private enum ToolbarIdentifier {
         static let main = NSToolbar.Identifier("MainToolbarV16")
@@ -14,18 +19,25 @@ final class MainWindowController: NSWindowController {
         static let refresh = NSToolbarItem.Identifier("Refresh")
         static let newFolder = NSToolbarItem.Identifier("NewFolder")
         static let upload = NSToolbarItem.Identifier("Upload")
+        static let checkout = NSToolbarItem.Identifier("CheckoutWorkingCopy")
         static let search = NSToolbarItem.Identifier("Search")
     }
 
-    init(sidebarViewController: SidebarViewController, browserViewController: BrowserViewController) {
+    init(
+        sidebarViewController: SidebarViewController,
+        browserViewController: BrowserViewController,
+        workingCopyViewController: WorkingCopyViewController? = nil
+    ) {
         self.browserViewController = browserViewController
+        self.workingCopyViewController = workingCopyViewController
         let splitViewController = NSSplitViewController()
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarViewController)
         sidebarItem.canCollapse = true
         sidebarItem.minimumThickness = 210
         sidebarItem.maximumThickness = 280
         splitViewController.addSplitViewItem(sidebarItem)
-        splitViewController.addSplitViewItem(NSSplitViewItem(viewController: browserViewController))
+        contentContainerController.show(browserViewController)
+        splitViewController.addSplitViewItem(NSSplitViewItem(viewController: contentContainerController))
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720),
@@ -57,6 +69,9 @@ final class MainWindowController: NSWindowController {
             }
             self.window?.toolbar?.validateVisibleItems()
         }
+        workingCopyViewController?.onNavigationStateChange = { [weak self] in
+            self?.window?.toolbar?.validateVisibleItems()
+        }
     }
 
     @available(*, unavailable)
@@ -75,14 +90,36 @@ final class MainWindowController: NSWindowController {
 
     @objc private func navigateBack() { browserViewController.navigateBack() }
     @objc private func navigateForward() { browserViewController.navigateForward() }
-    @objc private func refreshRepository() { browserViewController.refreshRepository() }
+    @objc private func refreshRepository() {
+        switch contentMode {
+        case .repository: browserViewController.refreshRepository()
+        case .workingCopy: workingCopyViewController?.refreshWorkingCopy()
+        }
+    }
     @objc private func createFolder() { browserViewController.createFolder() }
     @objc private func uploadFiles() { browserViewController.uploadFiles() }
+    @objc private func checkoutWorkingCopy() { browserViewController.checkoutCurrentDirectory() }
     @objc private func connectRepository() { onConnectRepository?() }
     @objc private func submitSearch() { performSearch() }
 
     private func performSearch() {
         browserViewController.updateSearch(query: searchField.stringValue)
+    }
+
+    func showRepositoryBrowser() {
+        guard contentMode != .repository else { return }
+        contentMode = .repository
+        contentContainerController.show(browserViewController)
+        searchField.isEnabled = true
+        window?.toolbar?.validateVisibleItems()
+    }
+
+    func showWorkingCopy() {
+        guard let workingCopyViewController, contentMode != .workingCopy else { return }
+        contentMode = .workingCopy
+        contentContainerController.show(workingCopyViewController)
+        searchField.isEnabled = false
+        window?.toolbar?.validateVisibleItems()
     }
 }
 
@@ -90,16 +127,40 @@ extension MainWindowController: NSToolbarItemValidation {
     func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
         switch item.itemIdentifier {
         case ToolbarIdentifier.back:
-            return browserViewController.canGoBack
+            return contentMode == .repository && browserViewController.canGoBack
         case ToolbarIdentifier.forward:
-            return browserViewController.canGoForward
-        case ToolbarIdentifier.refresh, ToolbarIdentifier.newFolder, ToolbarIdentifier.upload:
-            return browserViewController.canModifyRepository
+            return contentMode == .repository && browserViewController.canGoForward
+        case ToolbarIdentifier.refresh:
+            return contentMode == .repository
+                ? browserViewController.hasRepositoryConnection && browserViewController.canModifyRepository
+                : workingCopyViewController?.canRefresh == true
+        case ToolbarIdentifier.newFolder, ToolbarIdentifier.upload:
+            return contentMode == .repository && browserViewController.canModifyRepository
+        case ToolbarIdentifier.checkout:
+            return contentMode == .repository && browserViewController.canCheckoutCurrentDirectory
         case ToolbarIdentifier.search:
-            return browserViewController.hasRepositoryConnection
+            return contentMode == .repository && browserViewController.hasRepositoryConnection
         default:
             return true
         }
+    }
+}
+
+private final class MainContentViewController: NSViewController {
+    private weak var currentViewController: NSViewController?
+
+    override func loadView() {
+        view = NSView()
+    }
+
+    func show(_ viewController: NSViewController) {
+        guard currentViewController !== viewController else { return }
+        currentViewController?.view.removeFromSuperview()
+        currentViewController?.removeFromParent()
+        addChild(viewController)
+        view.addSubview(viewController.view)
+        viewController.view.snp.makeConstraints { $0.edges.equalToSuperview() }
+        currentViewController = viewController
     }
 }
 
@@ -110,7 +171,7 @@ extension MainWindowController: NSToolbarDelegate {
             ToolbarIdentifier.back, ToolbarIdentifier.forward,
             ToolbarIdentifier.refresh, .flexibleSpace,
             ToolbarIdentifier.search,
-            ToolbarIdentifier.newFolder, ToolbarIdentifier.upload, .space
+            ToolbarIdentifier.checkout, ToolbarIdentifier.newFolder, ToolbarIdentifier.upload, .space
         ]
     }
 
@@ -120,7 +181,7 @@ extension MainWindowController: NSToolbarDelegate {
             ToolbarIdentifier.back, ToolbarIdentifier.forward,
             ToolbarIdentifier.refresh, .flexibleSpace,
             ToolbarIdentifier.search,
-            ToolbarIdentifier.newFolder, ToolbarIdentifier.upload
+            ToolbarIdentifier.checkout, ToolbarIdentifier.newFolder, ToolbarIdentifier.upload
         ]
     }
 
@@ -154,7 +215,7 @@ extension MainWindowController: NSToolbarDelegate {
         case ToolbarIdentifier.refresh:
             return makeToolbarItem(
                 identifier: itemIdentifier,
-                label: "刷新缓存",
+                label: "刷新",
                 symbolName: "arrow.clockwise",
                 action: #selector(refreshRepository)
             )
@@ -171,6 +232,13 @@ extension MainWindowController: NSToolbarDelegate {
                 label: "上传",
                 symbolName: "square.and.arrow.up",
                 action: #selector(uploadFiles)
+            )
+        case ToolbarIdentifier.checkout:
+            return makeToolbarItem(
+                identifier: itemIdentifier,
+                label: "检出",
+                symbolName: "externaldrive.badge.plus",
+                action: #selector(checkoutWorkingCopy)
             )
         case ToolbarIdentifier.search:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)

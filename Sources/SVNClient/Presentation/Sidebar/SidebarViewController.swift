@@ -11,6 +11,11 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
     var onSelectSavedItem: ((UUID, URL, String, SavedRepositoryItemKind, Int?, UUID?) -> Void)?
     var onRenameFavorite: ((UUID, String) -> Void)?
     var onRemoveFavorite: ((UUID) -> Void)?
+    var onSelectWorkingCopy: ((UUID) -> Void)?
+    var onRevealWorkingCopy: ((URL) -> Void)?
+    var onRemoveWorkingCopy: ((UUID) -> Void)?
+    var onRelocateWorkingCopy: ((UUID) -> Void)?
+    var onRenameWorkingCopy: ((UUID, String) -> Void)?
 
     private let stateStore: SidebarStateStore
     private let scrollView = NSScrollView()
@@ -20,6 +25,7 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
     private var rootNodes = SidebarItem.roots(profiles: [])
     private var profiles: [RepositoryProfile] = []
     private var favorites: [FavoriteRepositoryItem] = []
+    private var workingCopies: [(WorkingCopy, WorkingCopyAvailability)] = []
     private var isRestoringState = false
     private var isSelectingContextMenuItem = false
     private var shouldActivateRestoredSelection = false
@@ -86,6 +92,11 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
         menu.addItem(.separator())
         menu.addItem(withTitle: "重命名收藏…", action: #selector(renameFavorite), keyEquivalent: "")
         menu.addItem(withTitle: "从收藏移除", action: #selector(removeFavorite), keyEquivalent: "")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "在 Finder 中显示", action: #selector(revealWorkingCopy), keyEquivalent: "")
+        menu.addItem(withTitle: "重新定位…", action: #selector(relocateWorkingCopy), keyEquivalent: "")
+        menu.addItem(withTitle: "重命名工作副本…", action: #selector(renameWorkingCopy), keyEquivalent: "")
+        menu.addItem(withTitle: "移除工作副本记录", action: #selector(removeWorkingCopy), keyEquivalent: "")
         for item in menu.items { item.target = self }
         menu.delegate = self
         outlineView.menu = menu
@@ -167,6 +178,48 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
         onRenameFavorite?(favorite.id, name)
     }
 
+    @objc private func revealWorkingCopy() {
+        guard let item = selectedSidebarItem,
+              case let .workingCopy(workingCopy, availability) = item.kind,
+              availability == .available else { return }
+        onRevealWorkingCopy?(workingCopy.localURL)
+    }
+
+    @objc private func removeWorkingCopy() {
+        guard let item = selectedSidebarItem,
+              case let .workingCopy(workingCopy, _) = item.kind else { return }
+        onRemoveWorkingCopy?(workingCopy.id)
+    }
+
+    @objc private func relocateWorkingCopy() {
+        guard let item = selectedSidebarItem,
+              case let .workingCopy(workingCopy, _) = item.kind else { return }
+        onRelocateWorkingCopy?(workingCopy.id)
+    }
+
+    @objc private func renameWorkingCopy() {
+        guard let item = selectedSidebarItem,
+              case let .workingCopy(workingCopy, _) = item.kind else { return }
+        let alert = NSAlert()
+        alert.messageText = "重命名工作副本"
+        alert.informativeText = "只修改侧边栏中的显示名称，不会重命名本地文件夹或 SVN 仓库目录。"
+        alert.addButton(withTitle: "重命名")
+        alert.addButton(withTitle: "取消")
+        let field = NSTextField(string: workingCopy.displayName)
+        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        DispatchQueue.main.async { [weak alert, weak field] in
+            guard let alert, let field else { return }
+            alert.window.makeFirstResponder(field)
+            field.currentEditor()?.selectedRange = NSRange(location: 0, length: field.stringValue.utf16.count)
+        }
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != workingCopy.displayName else { return }
+        onRenameWorkingCopy?(workingCopy.id, name)
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
         guard menu === outlineView.menu,
               let event = NSApp.currentEvent,
@@ -199,6 +252,15 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
         case #selector(renameFavorite), #selector(removeFavorite):
             if case .favorite = item.kind { return true }
             return false
+        case #selector(revealWorkingCopy):
+            if case let .workingCopy(_, availability) = item.kind { return availability == .available }
+            return false
+        case #selector(removeWorkingCopy), #selector(renameWorkingCopy):
+            if case .workingCopy = item.kind { return true }
+            return false
+        case #selector(relocateWorkingCopy):
+            if case .workingCopy = item.kind { return true }
+            return false
         default:
             return false
         }
@@ -219,10 +281,27 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
         }
         let updatedCommonRoot = SidebarItem.roots(
             profiles: profiles,
-            favorites: favorites
+            favorites: favorites,
+            workingCopies: workingCopies
         )[0]
         favoritesRoot.children = updatedCommonRoot.children[0].children
         outlineView.reloadItem(favoritesRoot, reloadChildren: true)
+        restoreOutlineState()
+    }
+
+    func setWorkingCopies(_ workingCopies: [(WorkingCopy, WorkingCopyAvailability)]) {
+        self.workingCopies = workingCopies
+        guard let workingCopyRoot = rootNodes.first(where: { $0.stateKey == "group.working-copies" }),
+              let updatedRoot = SidebarItem.roots(
+                  profiles: profiles,
+                  favorites: favorites,
+                  workingCopies: workingCopies
+              ).first(where: { $0.stateKey == "group.working-copies" }) else {
+            rebuildRoots()
+            return
+        }
+        workingCopyRoot.children = updatedRoot.children
+        outlineView.reloadItem(workingCopyRoot, reloadChildren: true)
         restoreOutlineState()
     }
 
@@ -232,10 +311,33 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
         stateStore.setSelected(key: nil)
     }
 
+    func selectWorkingCopy(id: UUID) {
+        guard let group = rootNodes.first(where: { $0.stateKey == "group.working-copies" }),
+              let item = group.children.first(where: {
+                  if case let .workingCopy(workingCopy, _) = $0.kind { return workingCopy.id == id }
+                  return false
+              }) else { return }
+        outlineView.expandItem(group)
+        stateStore.setExpanded(true, key: "group.working-copies")
+        let row = outlineView.row(forItem: item)
+        guard row >= 0 else { return }
+        isRestoringState = true
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        isRestoringState = false
+        stateStore.setSelected(key: item.stateKey)
+    }
+
+    func clearWorkingCopySelection(id: UUID) {
+        let key = "working-copy.\(id.uuidString)"
+        guard stateStore.selectedItemKey == key else { return }
+        outlineView.deselectAll(nil)
+        stateStore.setSelected(key: nil)
+    }
+
     private func rebuildRoots() {
         directoryLoadTasks.values.forEach { $0.task.cancel() }
         directoryLoadTasks.removeAll()
-        rootNodes = SidebarItem.roots(profiles: profiles, favorites: favorites)
+        rootNodes = SidebarItem.roots(profiles: profiles, favorites: favorites, workingCopies: workingCopies)
         outlineView.reloadData()
         restoreOutlineState()
     }
@@ -305,6 +407,10 @@ final class SidebarViewController: NSViewController, NSMenuItemValidation, NSMen
     private func restoreSelectionIfAvailable() -> SidebarItem? {
         guard let key = stateStore.selectedItemKey,
               let selected = findItem(where: { $0.stateKey == key }) else { return nil }
+        if key.hasPrefix("working-copy."),
+           let group = rootNodes.first(where: { $0.stateKey == "group.working-copies" }) {
+            outlineView.expandItem(group)
+        }
         let row = outlineView.row(forItem: selected)
         guard row >= 0 else { return nil }
         outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -345,7 +451,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
         guard let sidebarItem = item as? SidebarItem else { return false }
         switch sidebarItem.kind {
-        case .repository, .directory, .favorite: return true
+        case .repository, .directory, .favorite, .workingCopy: return true
         default: return false
         }
     }
@@ -385,6 +491,9 @@ extension SidebarViewController: NSOutlineViewDelegate {
                     saved.favoriteID
                 )
             }
+        case let .workingCopy(workingCopy, availability):
+            guard availability == .available else { NSSound.beep(); return }
+            onSelectWorkingCopy?(workingCopy.id)
         default:
             break
         }
@@ -538,14 +647,16 @@ private final class SidebarCellView: NSTableCellView {
         titleLabel.stringValue = item.title
         subtitleLabel.stringValue = item.subtitle ?? ""
         subtitleLabel.isHidden = item.subtitle == nil
-        titleLabel.textColor = item.repositoryProfileID == nil && item.subtitle != nil
+        let isWorkingCopy: Bool
+        if case .workingCopy = item.kind { isWorkingCopy = true } else { isWorkingCopy = false }
+        titleLabel.textColor = item.repositoryProfileID == nil && item.subtitle != nil && !isWorkingCopy
             ? .secondaryLabelColor
             : .labelColor
         symbolView.image = NSImage(
             systemSymbolName: item.symbolName,
             accessibilityDescription: item.title
         )
-        symbolView.contentTintColor = item.repositoryProfileID == nil
+        symbolView.contentTintColor = item.repositoryProfileID == nil && !isWorkingCopy
             ? .secondaryLabelColor
             : .controlAccentColor
     }

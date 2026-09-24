@@ -11,6 +11,7 @@
 		09140E503D4E984CDB3B1B60 /* SVNCLIGatewayWriteIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 846C0ED0FF634009F9BBE2F9 /* SVNCLIGatewayWriteIntegrationTests.swift */; };
 		095B01C29CA854CE115CE442 /* RepositoryMetadataStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30A5B9B2E6BC5B5A5FA47571 /* RepositoryMetadataStoreTests.swift */; };
 		0D377F70D14D7CE3454F7B19 /* SVNExecutableResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4343591CDECBF972CA828010 /* SVNExecutableResolver.swift */; };
+		141C00646A8A9E93F42DBA60 /* WorkingCopyViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 124A772ABB564245DE180860 /* WorkingCopyViewController.swift */; };
 		1652ED203EF80DFBBCA0C56A /* RepositoryPathTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DA878CC0735BCC2B424541A /* RepositoryPathTests.swift */; };
 		1984ACAE0E6E0F7C606332B3 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 878042ECD9C050AB2CECEA25 /* main.swift */; };
 		1C097A495013E687DDF0C5A6 /* SVNExecutableResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36FDB96A67EE91169EF67E56 /* SVNExecutableResolverTests.swift */; };
@@ -33,7 +34,10 @@
 		81495686A1BCE5C5487904C6 /* RepositoryMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = 262679C85CDBF24C3E3B0F85 /* RepositoryMetadata.swift */; };
 		85D90CC39D939D01188BFF0F /* svn-list.xml in Resources */ = {isa = PBXBuildFile; fileRef = 4AE805CAA329E88EC808BC83 /* svn-list.xml */; };
 		86065D8C02C58EB10FE07973 /* SVNInfoDTO.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2D6C8A4FB68474C80C611C4 /* SVNInfoDTO.swift */; };
+		86C7C2C9EB63A4EE9B9C60BC /* CheckoutProgressViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F683B5280040D41507B1B51C /* CheckoutProgressViewController.swift */; };
 		88C6E75C75CEFF39E4D7E6BE /* WordDiffWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B298DA20EEA54E68C82EF69 /* WordDiffWindowController.swift */; };
+		8AE5D036390A13D9C8DA13EA /* WorkingCopyStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEB012D491D8160E356A792D /* WorkingCopyStoreTests.swift */; };
+		8BF521772A645D5BDFE50BE9 /* WorkingCopyService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AD7403734AB347A456E9764 /* WorkingCopyService.swift */; };
 		8D4F8E0114B024E673CF2F46 /* XMLCoder in Frameworks */ = {isa = PBXBuildFile; productRef = 8451ACE33D18A207AEFBBF18 /* XMLCoder */; };
 		8DD11E655F99ECAF2E211763 /* RepositoryProfileStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7525955FB7BEA33A10954D6F /* RepositoryProfileStoreTests.swift */; };
 		8F4F0D662AC2217F2F59F703 /* RepositoryBrowsing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 893D85B3948D172AB3BF7797 /* RepositoryBrowsing.swift */; };
@@ -44,20 +48,25 @@
 		AC395B4349F9C3D412BDD7F1 /* RepositoryEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9589994474D12D5312356C73 /* RepositoryEntry.swift */; };
 		B8A78FA08C52CDC8CD932C13 /* FileHistoryViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D3ECDE1D40FE4F629E9E4BB /* FileHistoryViewController.swift */; };
 		B938855309B94FFEEC5D96BF /* RepositoryProfileService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3B7CED21ABF809F7E324C14 /* RepositoryProfileService.swift */; };
+		B9F7A5ADD602EF30EF89446F /* WorkingCopyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4BA3ED5178B035AD27649E /* WorkingCopyStore.swift */; };
 		C14FCD9FBC146DC686060EC5 /* SidebarViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E37A8524B89A7A3388BAAF41 /* SidebarViewController.swift */; };
 		C2445B147756EF3B90555939 /* RepositoryMetadataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1621A34FC3C409F121F5E1CB /* RepositoryMetadataStore.swift */; };
 		C587608B2225CDA0E44D05C9 /* BrowserViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AD6C5CD5BA4693964D39E5E /* BrowserViewController.swift */; };
 		C9A88586B819A6A7147F0107 /* RepositoryProfileDeletionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4100E9876F54E3262536125 /* RepositoryProfileDeletionCoordinator.swift */; };
 		CEC4A14154E6E1544318ADFC /* SVNLogDTO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45E5DD04446455285F4C401A /* SVNLogDTO.swift */; };
+		CF00E7FB24AE28B2A5AC3538 /* SVNStatusDTO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EB576B3BEE5BD6AD55D60ED /* SVNStatusDTO.swift */; };
 		D0208775E469298E5DADFBC9 /* WordDiffRuntime in Resources */ = {isa = PBXBuildFile; fileRef = AE6972737B83CFC0DDC3BA48 /* WordDiffRuntime */; };
+		D58FB6E226113855CC9B5B36 /* WorkingCopyViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2365D1F74A70B227DBE2805B /* WorkingCopyViewModel.swift */; };
 		D8A220CD8F699D96ACD1AA31 /* SnapKit in Frameworks */ = {isa = PBXBuildFile; productRef = 055BEB5FDD565298B9D05BF7 /* SnapKit */; };
 		E1AFA2D4E47F6451DB23D457 /* RepositoryMetadataService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1FB6F49306028F18D4FA0E9 /* RepositoryMetadataService.swift */; };
 		E526E06385105199055DBFBF /* SidebarStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1996F1EDD38FE6E5D3E12D4 /* SidebarStateStore.swift */; };
 		E67E97386EAEAEE99B9084AC /* MainCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACB21D996BC136604EFD691A /* MainCoordinator.swift */; };
 		EA0BEEB9DBB1BA3390F4C62A /* BrowserViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 450A95C0A941F925A26B85F3 /* BrowserViewModel.swift */; };
+		EFE2F13CE8E6DE5D3B2ACA58 /* WorkingCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A6973874116DAA5B4B65F6E /* WorkingCopy.swift */; };
 		F4D71CB6F1F6153E7B443A8F /* SVNRuntime in Resources */ = {isa = PBXBuildFile; fileRef = 967BF9B9FA8190C897F087C9 /* SVNRuntime */; };
 		FD04DD26244EA45A80645D8F /* RepositoryPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D9237E196E1E11361C04D89 /* RepositoryPath.swift */; };
 		FD3ED9BF19720FAD2AC4BDCF /* KeychainAccess in Frameworks */ = {isa = PBXBuildFile; productRef = F65BFABADB2F1B98B144FB57 /* KeychainAccess */; };
+		FD49A943C06CD9D5B720E01F /* WorkingCopyServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17BB704F3FDA8426FC9BD136 /* WorkingCopyServiceTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -73,9 +82,12 @@
 /* Begin PBXFileReference section */
 		09C706FBA91ED329377DAFE9 /* AppRuntimeEnvironmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRuntimeEnvironmentTests.swift; sourceTree = "<group>"; };
 		0F5E63399FC77A40C910DC6D /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		124A772ABB564245DE180860 /* WorkingCopyViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingCopyViewController.swift; sourceTree = "<group>"; };
 		1621A34FC3C409F121F5E1CB /* RepositoryMetadataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryMetadataStore.swift; sourceTree = "<group>"; };
+		17BB704F3FDA8426FC9BD136 /* WorkingCopyServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingCopyServiceTests.swift; sourceTree = "<group>"; };
 		1A9AE5EE4B31A56AF8F58D0A /* WordDiffService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordDiffService.swift; sourceTree = "<group>"; };
 		1BF35251B9E18628C9A9DAD9 /* SVNClientTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SVNClientTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		2365D1F74A70B227DBE2805B /* WorkingCopyViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingCopyViewModel.swift; sourceTree = "<group>"; };
 		2399A54B8D089AB77400DEC1 /* AppRuntimeEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRuntimeEnvironment.swift; sourceTree = "<group>"; };
 		262679C85CDBF24C3E3B0F85 /* RepositoryMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryMetadata.swift; sourceTree = "<group>"; };
 		2D49E18738D2EC236ED2E6CB /* WordDiffServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordDiffServiceTests.swift; sourceTree = "<group>"; };
@@ -91,11 +103,13 @@
 		4D9237E196E1E11361C04D89 /* RepositoryPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryPath.swift; sourceTree = "<group>"; };
 		4DA878CC0735BCC2B424541A /* RepositoryPathTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryPathTests.swift; sourceTree = "<group>"; };
 		61B3A204B0D9A93BE2FDCDDD /* SVNClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNClient.swift; sourceTree = "<group>"; };
+		6AD7403734AB347A456E9764 /* WorkingCopyService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingCopyService.swift; sourceTree = "<group>"; };
 		6D3ECDE1D40FE4F629E9E4BB /* FileHistoryViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileHistoryViewController.swift; sourceTree = "<group>"; };
 		70280189C97E8E0581F9FCA9 /* SVNCommandRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNCommandRunner.swift; sourceTree = "<group>"; };
 		7525955FB7BEA33A10954D6F /* RepositoryProfileStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryProfileStoreTests.swift; sourceTree = "<group>"; };
 		7AD6C5CD5BA4693964D39E5E /* BrowserViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserViewController.swift; sourceTree = "<group>"; };
 		7B298DA20EEA54E68C82EF69 /* WordDiffWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordDiffWindowController.swift; sourceTree = "<group>"; };
+		7EB576B3BEE5BD6AD55D60ED /* SVNStatusDTO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNStatusDTO.swift; sourceTree = "<group>"; };
 		8405D6D3FB53C84250BAB310 /* AppBrand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppBrand.swift; sourceTree = "<group>"; };
 		846C0ED0FF634009F9BBE2F9 /* SVNCLIGatewayWriteIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNCLIGatewayWriteIntegrationTests.swift; sourceTree = "<group>"; };
 		878042ECD9C050AB2CECEA25 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
@@ -104,6 +118,7 @@
 		9589994474D12D5312356C73 /* RepositoryEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryEntry.swift; sourceTree = "<group>"; };
 		967BF9B9FA8190C897F087C9 /* SVNRuntime */ = {isa = PBXFileReference; lastKnownFileType = folder; name = SVNRuntime; path = Vendor/SVNRuntime; sourceTree = SOURCE_ROOT; };
 		9812E0632CE0B52DBAB37950 /* SVNListDTO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNListDTO.swift; sourceTree = "<group>"; };
+		9A6973874116DAA5B4B65F6E /* WorkingCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingCopy.swift; sourceTree = "<group>"; };
 		A1996F1EDD38FE6E5D3E12D4 /* SidebarStateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarStateStore.swift; sourceTree = "<group>"; };
 		AA43CF1673209AE2C01EAD52 /* RepositoryProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryProfile.swift; sourceTree = "<group>"; };
 		ACB21D996BC136604EFD691A /* MainCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainCoordinator.swift; sourceTree = "<group>"; };
@@ -116,10 +131,13 @@
 		D2D6C8A4FB68474C80C611C4 /* SVNInfoDTO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVNInfoDTO.swift; sourceTree = "<group>"; };
 		D4100E9876F54E3262536125 /* RepositoryProfileDeletionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryProfileDeletionCoordinator.swift; sourceTree = "<group>"; };
 		DD969BBC5302793D6B69A251 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		DEB012D491D8160E356A792D /* WorkingCopyStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingCopyStoreTests.swift; sourceTree = "<group>"; };
 		E1FB6F49306028F18D4FA0E9 /* RepositoryMetadataService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryMetadataService.swift; sourceTree = "<group>"; };
 		E37A8524B89A7A3388BAAF41 /* SidebarViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarViewController.swift; sourceTree = "<group>"; };
 		E673DCD3EBB9A96148FA49D3 /* CredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialStore.swift; sourceTree = "<group>"; };
 		F40D1F57794C36E2173275B8 /* RepositoryConnectionViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryConnectionViewController.swift; sourceTree = "<group>"; };
+		F683B5280040D41507B1B51C /* CheckoutProgressViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CheckoutProgressViewController.swift; sourceTree = "<group>"; };
+		FB4BA3ED5178B035AD27649E /* WorkingCopyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingCopyStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -191,6 +209,7 @@
 				E1FB6F49306028F18D4FA0E9 /* RepositoryMetadataService.swift */,
 				D4100E9876F54E3262536125 /* RepositoryProfileDeletionCoordinator.swift */,
 				C3B7CED21ABF809F7E324C14 /* RepositoryProfileService.swift */,
+				6AD7403734AB347A456E9764 /* WorkingCopyService.swift */,
 			);
 			path = Application;
 			sourceTree = "<group>";
@@ -201,6 +220,7 @@
 				C2CC9A4BADAE3B23B1504E6E /* Browser */,
 				8EAD4C9C9D06BCC4F339D855 /* Connection */,
 				652D70D2758308A9F4CCACDE /* Sidebar */,
+				C8D43F711341B5677FC37658 /* WorkingCopy */,
 			);
 			path = Presentation;
 			sourceTree = "<group>";
@@ -223,6 +243,7 @@
 				D2D6C8A4FB68474C80C611C4 /* SVNInfoDTO.swift */,
 				9812E0632CE0B52DBAB37950 /* SVNListDTO.swift */,
 				45E5DD04446455285F4C401A /* SVNLogDTO.swift */,
+				7EB576B3BEE5BD6AD55D60ED /* SVNStatusDTO.swift */,
 			);
 			path = SVN;
 			sourceTree = "<group>";
@@ -244,6 +265,7 @@
 				262679C85CDBF24C3E3B0F85 /* RepositoryMetadata.swift */,
 				4D9237E196E1E11361C04D89 /* RepositoryPath.swift */,
 				AA43CF1673209AE2C01EAD52 /* RepositoryProfile.swift */,
+				9A6973874116DAA5B4B65F6E /* WorkingCopy.swift */,
 			);
 			path = Domain;
 			sourceTree = "<group>";
@@ -304,6 +326,8 @@
 				846C0ED0FF634009F9BBE2F9 /* SVNCLIGatewayWriteIntegrationTests.swift */,
 				36FDB96A67EE91169EF67E56 /* SVNExecutableResolverTests.swift */,
 				2D49E18738D2EC236ED2E6CB /* WordDiffServiceTests.swift */,
+				17BB704F3FDA8426FC9BD136 /* WorkingCopyServiceTests.swift */,
+				DEB012D491D8160E356A792D /* WorkingCopyStoreTests.swift */,
 				2A0E39048DD03962B809600A /* Fixtures */,
 			);
 			name = SVNClientTests;
@@ -315,6 +339,7 @@
 			children = (
 				1621A34FC3C409F121F5E1CB /* RepositoryMetadataStore.swift */,
 				3FBA22F2201413ECFCCF4781 /* RepositoryProfileStore.swift */,
+				FB4BA3ED5178B035AD27649E /* WorkingCopyStore.swift */,
 			);
 			path = Persistence;
 			sourceTree = "<group>";
@@ -328,6 +353,16 @@
 				7B298DA20EEA54E68C82EF69 /* WordDiffWindowController.swift */,
 			);
 			path = Browser;
+			sourceTree = "<group>";
+		};
+		C8D43F711341B5677FC37658 /* WorkingCopy */ = {
+			isa = PBXGroup;
+			children = (
+				F683B5280040D41507B1B51C /* CheckoutProgressViewController.swift */,
+				124A772ABB564245DE180860 /* WorkingCopyViewController.swift */,
+				2365D1F74A70B227DBE2805B /* WorkingCopyViewModel.swift */,
+			);
+			path = WorkingCopy;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -519,6 +554,8 @@
 				1C097A495013E687DDF0C5A6 /* SVNExecutableResolverTests.swift in Sources */,
 				70E12DA22E4F77223599B9DC /* SidebarStateStoreTests.swift in Sources */,
 				5A1221A96FF7D72D60251416 /* WordDiffServiceTests.swift in Sources */,
+				FD49A943C06CD9D5B720E01F /* WorkingCopyServiceTests.swift in Sources */,
+				8AE5D036390A13D9C8DA13EA /* WorkingCopyStoreTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -531,6 +568,7 @@
 				1E83278021EAEA0C3595E18F /* AppRuntimeEnvironment.swift in Sources */,
 				C587608B2225CDA0E44D05C9 /* BrowserViewController.swift in Sources */,
 				EA0BEEB9DBB1BA3390F4C62A /* BrowserViewModel.swift in Sources */,
+				86C7C2C9EB63A4EE9B9C60BC /* CheckoutProgressViewController.swift in Sources */,
 				552C62BA4193CDDD10E1B524 /* CredentialStore.swift in Sources */,
 				B8A78FA08C52CDC8CD932C13 /* FileHistoryViewController.swift in Sources */,
 				E67E97386EAEAEE99B9084AC /* MainCoordinator.swift in Sources */,
@@ -552,11 +590,17 @@
 				86065D8C02C58EB10FE07973 /* SVNInfoDTO.swift in Sources */,
 				263D14F9BFCC6B15487DBCD9 /* SVNListDTO.swift in Sources */,
 				CEC4A14154E6E1544318ADFC /* SVNLogDTO.swift in Sources */,
+				CF00E7FB24AE28B2A5AC3538 /* SVNStatusDTO.swift in Sources */,
 				A308C24E61ECFF81D3A4BD44 /* SidebarItem.swift in Sources */,
 				E526E06385105199055DBFBF /* SidebarStateStore.swift in Sources */,
 				C14FCD9FBC146DC686060EC5 /* SidebarViewController.swift in Sources */,
 				58C137F000148D07705F7C37 /* WordDiffService.swift in Sources */,
 				88C6E75C75CEFF39E4D7E6BE /* WordDiffWindowController.swift in Sources */,
+				EFE2F13CE8E6DE5D3B2ACA58 /* WorkingCopy.swift in Sources */,
+				8BF521772A645D5BDFE50BE9 /* WorkingCopyService.swift in Sources */,
+				B9F7A5ADD602EF30EF89446F /* WorkingCopyStore.swift in Sources */,
+				141C00646A8A9E93F42DBA60 /* WorkingCopyViewController.swift in Sources */,
+				D58FB6E226113855CC9B5B36 /* WorkingCopyViewModel.swift in Sources */,
 				1984ACAE0E6E0F7C606332B3 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

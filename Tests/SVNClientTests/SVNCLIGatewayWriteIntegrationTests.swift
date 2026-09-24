@@ -260,6 +260,55 @@ final class SVNCLIGatewayWriteIntegrationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: exportedFolder.appendingPathComponent(".DS_Store").path))
     }
 
+    func testCheckoutAndWorkingCopyStatusAgainstLocalRepository() async throws {
+        guard SVNExecutableResolver.resolve(command: "svn") != nil,
+              SVNExecutableResolver.resolve(command: "svnadmin") != nil else {
+            throw XCTSkip("svn and svnadmin are required for the local integration test")
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SVNClientWorkingCopyTests-\(UUID().uuidString)", isDirectory: true)
+        let repositoryPath = root.appendingPathComponent("repository", isDirectory: true)
+        let sourceFile = root.appendingPathComponent("说明.txt")
+        let workingCopyURL = root.appendingPathComponent("working-copy", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try run("svnadmin", ["create", repositoryPath.path])
+        try Data("第一版".utf8).write(to: sourceFile)
+
+        let repositoryURL = URL(fileURLWithPath: repositoryPath.path)
+        let gateway = SVNCLIGateway()
+        _ = try await gateway.upload(
+            files: [sourceFile],
+            to: repositoryURL,
+            message: "initial content",
+            options: .anonymous
+        )
+
+        let info = try await gateway.checkout(url: repositoryURL, to: workingCopyURL, options: .anonymous)
+        XCTAssertEqual(info.localURL, workingCopyURL.standardizedFileURL)
+        XCTAssertEqual(info.repositoryURL.standardizedFileURL.path, repositoryURL.standardizedFileURL.path)
+        XCTAssertEqual(info.revision, 1)
+
+        let trackedFile = workingCopyURL.appendingPathComponent("说明.txt")
+        let unversionedFile = workingCopyURL.appendingPathComponent("新增.txt")
+        let cleanStatus = try await gateway.workingCopyStatus(at: workingCopyURL)
+        XCTAssertTrue(cleanStatus.isEmpty)
+
+        try run("svn", ["propset", "folio-test", "value", trackedFile.path])
+        let propertyStatus = try await gateway.workingCopyStatus(at: workingCopyURL)
+        XCTAssertEqual(propertyStatus.first(where: { $0.relativePath == "说明.txt" })?.state, .modified)
+        try run("svn", ["revert", trackedFile.path])
+
+        try Data("已修改".utf8).write(to: trackedFile)
+        try Data("新增".utf8).write(to: unversionedFile)
+
+        let status = try await gateway.workingCopyStatus(at: workingCopyURL)
+        let states = Dictionary(uniqueKeysWithValues: status.map { ($0.relativePath, $0.state) })
+        XCTAssertEqual(states["说明.txt"], .modified)
+        XCTAssertEqual(states["新增.txt"], .unversioned)
+    }
+
     @discardableResult
     private func run(_ command: String, _ arguments: [String]) throws -> Data {
         let process = Process()

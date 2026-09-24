@@ -16,6 +16,9 @@ protocol SVNClient: Sendable {
     func delete(urls: [URL], message: String, options: SVNRequestOptions) async throws -> SVNWriteResult
     func upload(files: [URL], to directoryURL: URL, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult
     func replace(localFileURL: URL, targetURL: URL, expectedRevision: Int, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult
+    func checkout(url: URL, to destinationURL: URL, options: SVNRequestOptions) async throws -> SVNWorkingCopyInfo
+    func workingCopyInfo(at localURL: URL) async throws -> SVNWorkingCopyInfo
+    func workingCopyStatus(at localURL: URL) async throws -> [SVNWorkingCopyStatusEntry]
 }
 
 extension SVNClient {
@@ -78,6 +81,18 @@ extension SVNClient {
     }
 
     func replace(localFileURL: URL, targetURL: URL, expectedRevision: Int, message: String, options: SVNRequestOptions) async throws -> SVNWriteResult {
+        throw SVNClientError.unsupportedOperation
+    }
+
+    func checkout(url: URL, to destinationURL: URL, options: SVNRequestOptions) async throws -> SVNWorkingCopyInfo {
+        throw SVNClientError.unsupportedOperation
+    }
+
+    func workingCopyInfo(at localURL: URL) async throws -> SVNWorkingCopyInfo {
+        throw SVNClientError.unsupportedOperation
+    }
+
+    func workingCopyStatus(at localURL: URL) async throws -> [SVNWorkingCopyStatusEntry] {
         throw SVNClientError.unsupportedOperation
     }
 }
@@ -156,6 +171,71 @@ struct SVNWriteResult: Equatable, Sendable {
     let revision: Int?
 }
 
+struct SVNWorkingCopyInfo: Equatable, Sendable {
+    let repositoryURL: URL
+    let localURL: URL
+    let revision: Int
+}
+
+enum SVNWorkingCopyItemState: Equatable, Sendable {
+    case modified
+    case added
+    case unversioned
+    case deleted
+    case missing
+    case replaced
+    case conflicted
+    case obstructed
+    case ignored
+    case external
+    case incomplete
+    case normal
+    case unknown(String)
+
+    init(svnValue: String) {
+        switch svnValue {
+        case "modified": self = .modified
+        case "added": self = .added
+        case "unversioned": self = .unversioned
+        case "deleted": self = .deleted
+        case "missing": self = .missing
+        case "replaced": self = .replaced
+        case "conflicted": self = .conflicted
+        case "obstructed": self = .obstructed
+        case "ignored": self = .ignored
+        case "external": self = .external
+        case "incomplete": self = .incomplete
+        case "normal", "none": self = .normal
+        default: self = .unknown(svnValue)
+        }
+    }
+
+    var domainStatus: WorkingCopyItemStatus? {
+        switch self {
+        case .modified: .modified
+        case .added: .added
+        case .unversioned: .unversioned
+        case .deleted: .deleted
+        case .missing: .missing
+        case .replaced: .replaced
+        case .conflicted: .conflicted
+        case .obstructed: .obstructed
+        case .ignored: .ignored
+        case .external: .external
+        case .incomplete: .incomplete
+        case .normal: nil
+        case let .unknown(value): .unknown(value)
+        }
+    }
+}
+
+struct SVNWorkingCopyStatusEntry: Equatable, Sendable {
+    let localURL: URL
+    let relativePath: String
+    let state: SVNWorkingCopyItemState
+    let revision: Int?
+}
+
 struct SVNCommandFailure: Error, Equatable, Sendable {
     let operation: String
     let exitStatus: Int32
@@ -170,6 +250,8 @@ enum SVNClientError: Error, Equatable, Sendable {
     case invalidInfoXML
     case invalidPropertiesXML
     case invalidLogXML
+    case invalidStatusXML
+    case invalidWorkingCopy
     case destinationExists
     case invalidLocalFile(String)
     case duplicateLocalFileName(String)
@@ -218,6 +300,10 @@ extension SVNClientError: LocalizedError {
             return "仓库返回了无法解析的属性信息"
         case .invalidLogXML:
             return "仓库返回了无法解析的历史记录"
+        case .invalidStatusXML:
+            return "无法解析工作副本状态"
+        case .invalidWorkingCopy:
+            return "所选目录不是有效的 SVN 工作副本"
         case .destinationExists:
             return "本地目标已存在"
         case let .invalidLocalFile(name):
@@ -433,6 +519,106 @@ final class SVNCLIGateway: SVNClient, Sendable {
                 }
         } catch {
             throw SVNClientError.invalidLogXML
+        }
+    }
+
+    func checkout(
+        url: URL,
+        to destinationURL: URL,
+        options: SVNRequestOptions
+    ) async throws -> SVNWorkingCopyInfo {
+        let fileManager = FileManager.default
+        guard !fileManager.fileExists(atPath: destinationURL.path) else {
+            throw SVNClientError.destinationExists
+        }
+        let partialURL = destinationURL.deletingLastPathComponent()
+            .appendingPathComponent(".\(destinationURL.lastPathComponent).folio-checkout-\(UUID().uuidString)", isDirectory: true)
+        var didLandAtDestination = false
+        var didFinishVerification = false
+        defer {
+            try? fileManager.removeItem(at: partialURL)
+            if didLandAtDestination, !didFinishVerification {
+                try? fileManager.removeItem(at: destinationURL)
+            }
+        }
+
+        _ = try await executeAuthenticated(
+            operation: "checkout",
+            arguments: [
+                "checkout", Self.svnTarget(url.absoluteString), partialURL.path,
+                "--depth", "infinity", "--ignore-externals"
+            ],
+            urls: [url],
+            options: options
+        )
+        try Task.checkCancellation()
+        if renameatx_np(AT_FDCWD, partialURL.path, AT_FDCWD, destinationURL.path, UInt32(RENAME_EXCL)) != 0 {
+            let code = errno
+            if code == EEXIST { throw SVNClientError.destinationExists }
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+        }
+        didLandAtDestination = true
+        let info = try await workingCopyInfo(at: destinationURL)
+        try Task.checkCancellation()
+        didFinishVerification = true
+        return info
+    }
+
+    func workingCopyInfo(at localURL: URL) async throws -> SVNWorkingCopyInfo {
+        let output = try await execute(
+            operation: "working-copy-info",
+            arguments: ["info", Self.svnTarget(localURL.path), "--xml", "--non-interactive"]
+        )
+        let dto: SVNInfoDocumentDTO
+        do {
+            dto = try XMLDecoder().decode(SVNInfoDocumentDTO.self, from: output.standardOutput)
+        } catch {
+            throw SVNClientError.invalidWorkingCopy
+        }
+        guard let repositoryURL = URL(string: dto.entry.url),
+              SVNListEntry.Kind(svnValue: dto.entry.kind) == .directory else {
+            throw SVNClientError.invalidWorkingCopy
+        }
+        return SVNWorkingCopyInfo(
+            repositoryURL: repositoryURL,
+            localURL: localURL.standardizedFileURL,
+            revision: dto.entry.revision
+        )
+    }
+
+    func workingCopyStatus(at localURL: URL) async throws -> [SVNWorkingCopyStatusEntry] {
+        let rootURL = localURL.standardizedFileURL
+        let output = try await execute(
+            operation: "working-copy-status",
+            arguments: [
+                "status", Self.svnTarget(rootURL.path), "--xml", "--no-ignore", "--ignore-externals", "--non-interactive"
+            ]
+        )
+        do {
+            let document = try XMLDecoder().decode(SVNStatusDocumentDTO.self, from: output.standardOutput)
+            return document.target.flatMap(\.entry).map { entry in
+                let itemURL = Self.statusItemURL(path: entry.path, rootURL: rootURL)
+                let itemState = SVNWorkingCopyItemState(svnValue: entry.workingCopyStatus.item)
+                let state: SVNWorkingCopyItemState
+                switch entry.workingCopyStatus.properties {
+                case "conflicted":
+                    state = .conflicted
+                case "modified" where itemState == .normal:
+                    state = .modified
+                default:
+                    state = itemState
+                }
+                return SVNWorkingCopyStatusEntry(
+                    localURL: itemURL,
+                    relativePath: Self.relativePath(of: itemURL, rootURL: rootURL),
+                    state: state,
+                    revision: entry.workingCopyStatus.revision
+                )
+            }
+        } catch let error as SVNClientError {
+            throw error
+        } catch {
+            throw SVNClientError.invalidStatusXML
         }
     }
 
@@ -762,6 +948,22 @@ final class SVNCLIGateway: SVNClient, Sendable {
     private static func svnTarget(_ value: String, pegRevision: Int?) -> String {
         guard let pegRevision else { return svnTarget(value) }
         return "\(value)@\(pegRevision)"
+    }
+
+    private static func statusItemURL(path: String, rootURL: URL) -> URL {
+        if path.hasPrefix("/") {
+            return URL(fileURLWithPath: path).standardizedFileURL
+        }
+        return rootURL.appendingPathComponent(path).standardizedFileURL
+    }
+
+    private static func relativePath(of itemURL: URL, rootURL: URL) -> String {
+        let rootPath = rootURL.standardizedFileURL.path
+        let itemPath = itemURL.standardizedFileURL.path
+        guard itemPath != rootPath else { return "" }
+        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        guard itemPath.hasPrefix(prefix) else { return itemURL.lastPathComponent }
+        return String(itemPath.dropFirst(prefix.count))
     }
 
     private static func parseSVNDate(_ value: String) -> Date? {

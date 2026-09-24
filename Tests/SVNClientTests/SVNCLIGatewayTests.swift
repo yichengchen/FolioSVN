@@ -11,6 +11,54 @@ private func makeMockGateway(_ runner: MockSVNCommandRunner) -> SVNCLIGateway {
 }
 
 final class SVNCLIGatewayTests: XCTestCase {
+    func testWorkingCopyStatusMapsKnownAndUnknownSVNValues() {
+        let mappings: [(String, WorkingCopyItemStatus?)] = [
+            ("normal", nil),
+            ("modified", .modified),
+            ("added", .added),
+            ("unversioned", .unversioned),
+            ("deleted", .deleted),
+            ("missing", .missing),
+            ("replaced", .replaced),
+            ("conflicted", .conflicted),
+            ("obstructed", .obstructed),
+            ("ignored", .ignored),
+            ("external", .external),
+            ("incomplete", .incomplete),
+            ("future-state", .unknown("future-state"))
+        ]
+
+        for (rawValue, expected) in mappings {
+            XCTAssertEqual(SVNWorkingCopyItemState(svnValue: rawValue).domainStatus, expected)
+        }
+    }
+
+    func testCheckoutRemovesLandedDirectoryWhenFinalVerificationFails() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("checkout-verification-failure-\(UUID().uuidString)", isDirectory: true)
+        let destination = root.appendingPathComponent("working-copy", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let gateway = SVNCLIGateway(
+            runner: CheckoutVerificationFailureRunner(),
+            executableURL: URL(fileURLWithPath: "/bin/true")
+        )
+
+        do {
+            _ = try await gateway.checkout(
+                url: URL(string: "https://svn.example.com/repo")!,
+                to: destination,
+                options: .anonymous
+            )
+            XCTFail("Expected final working copy verification to fail")
+        } catch SVNClientError.invalidWorkingCopy {
+            // Expected.
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
+    }
+
     func testExportWithoutOverwritePreservesFileCreatedDuringDownload() async throws {
         try await assertLateDestinationIsPreserved(isDirectory: false)
     }
@@ -437,6 +485,31 @@ private final class MockSVNCommandRunner: SVNCommandRunning, @unchecked Sendable
     func run(executableURL: URL, arguments: [String], environment: [String: String]?, standardInput: Data?) async throws -> SVNProcessOutput {
         invocations.append(Invocation(arguments: arguments, environment: environment, standardInput: standardInput))
         return SVNProcessOutput(standardOutput: output.standardOutput, standardError: output.standardError, exitStatus: output.status)
+    }
+}
+
+private actor CheckoutVerificationFailureRunner: SVNCommandRunning {
+    private var invocationCount = 0
+
+    func run(
+        executableURL: URL,
+        arguments: [String],
+        environment: [String: String]?,
+        standardInput: Data?
+    ) async throws -> SVNProcessOutput {
+        invocationCount += 1
+        let currentInvocation = invocationCount
+        if currentInvocation == 1 {
+            let partialPath = arguments[2]
+            try FileManager.default.createDirectory(atPath: partialPath, withIntermediateDirectories: true)
+            try Data("content".utf8).write(to: URL(fileURLWithPath: partialPath).appendingPathComponent("file.txt"))
+            return SVNProcessOutput(standardOutput: Data(), standardError: Data(), exitStatus: 0)
+        }
+        return SVNProcessOutput(
+            standardOutput: Data("not xml".utf8),
+            standardError: Data(),
+            exitStatus: 0
+        )
     }
 }
 

@@ -7,6 +7,7 @@ final class SidebarItem {
         case destination
         case favoritesRoot
         case favorite(FavoriteRepositoryItem)
+        case workingCopy(WorkingCopy, WorkingCopyAvailability)
         case repository(UUID, URL)
         case directory(UUID, URL)
         case emptyState
@@ -46,6 +47,7 @@ final class SidebarItem {
         switch kind {
         case let .repository(profileID, _), let .directory(profileID, _): return profileID
         case let .favorite(item): return item.profileID
+        case let .workingCopy(item, _): return item.profileID
         default: return nil
         }
     }
@@ -65,11 +67,17 @@ final class SidebarItem {
     var stateKey: String? {
         switch kind {
         case .group:
-            return title == "常用" ? "group.common" : "group.repositories"
+            switch title {
+            case "常用": return "group.common"
+            case "工作副本": return "group.working-copies"
+            default: return "group.repositories"
+            }
         case .favoritesRoot:
             return "favorites.root"
         case let .favorite(item):
             return "favorite.\(item.id.uuidString)"
+        case let .workingCopy(item, _):
+            return "working-copy.\(item.id.uuidString)"
         case let .repository(profileID, _):
             return "repository.\(profileID.uuidString)"
         case let .directory(profileID, url):
@@ -85,7 +93,8 @@ final class SidebarItem {
 
     static func roots(
         profiles: [RepositoryProfile],
-        favorites: [FavoriteRepositoryItem] = []
+        favorites: [FavoriteRepositoryItem] = [],
+        workingCopies: [(WorkingCopy, WorkingCopyAvailability)] = []
     ) -> [SidebarItem] {
         let profilesByID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
         let favoriteChildren = favorites.isEmpty
@@ -125,6 +134,32 @@ final class SidebarItem {
                         children: [loadingPlaceholder()],
                         kind: .repository($0.id, $0.startURL),
                         hasLoadedChildren: false
+                    )
+                },
+                kind: .group
+            ),
+            SidebarItem(
+                "工作副本",
+                children: workingCopies.isEmpty ? [
+                    SidebarItem(
+                        "暂无工作副本",
+                        subtitle: "在仓库文件夹上右键检出",
+                        symbolName: "externaldrive",
+                        kind: .emptyState
+                    )
+                ] : workingCopies.map { workingCopy, availability in
+                    let subtitle: String
+                    switch availability {
+                    case .available: subtitle = workingCopy.localURL.path
+                    case .missing: subtitle = "位置不存在"
+                    case .invalid: subtitle = "不是有效的工作副本"
+                    case .inaccessible: subtitle = "没有读取权限"
+                    }
+                    return SidebarItem(
+                        workingCopy.displayName,
+                        subtitle: subtitle,
+                        symbolName: availability == .available ? "externaldrive.fill" : "externaldrive.badge.exclamationmark",
+                        kind: .workingCopy(workingCopy, availability)
                     )
                 },
                 kind: .group
